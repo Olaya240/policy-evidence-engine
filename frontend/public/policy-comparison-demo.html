@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f3ee">
+  <meta name="description" content="An offline synthetic policy comparison demo. Proposals only; no verified policy findings.">
+  <title>Policy Comparison Demo · Story Connect</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Arial, Helvetica, sans-serif;
+      color: #27322f;
+      background: #f4f3ee;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+      --ink: #27322f;
+      --muted: #69746d;
+      --line: #dedfd7;
+      --paper: #fffefa;
+      --forest: #285b48;
+      --forest-soft: #e8eee7;
+      --gold: #a78346;
+      --gold-soft: #f3eedf;
+      --mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; background: #f4f3ee; }
+    button { font: inherit; }
+    button:focus-visible, a:focus-visible { outline: 3px solid #8b6b32; outline-offset: 3px; }
+    .site-header { position: sticky; top: 0; z-index: 5; background: rgba(250,249,244,.97); border-bottom: 1px solid var(--line); }
+    .header-row { max-width: 1180px; height: 62px; margin: auto; padding: 0 26px; display: flex; align-items: center; justify-content: space-between; }
+    .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-size: 11px; font-weight: 700; letter-spacing: .14em; }
+    .brand-mark { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 50%; background: var(--forest); color: white; font: italic 18px Georgia, serif; }
+    .brand i { color: #56645b; font-style: normal; }
+    .local-label { color: var(--forest); font: 10px var(--mono); letter-spacing: .1em; }
+    .disclaimer { min-height: 43px; padding: 10px 20px; display: flex; justify-content: center; align-items: center; gap: 9px; background: #f3eedf; border-top: 1px solid #e8dfc9; color: #4d4026; text-align: center; font-size: 12px; font-weight: 700; }
+    .disclaimer-mark { color: var(--gold); font-size: 16px; }
+    main { width: min(1120px, calc(100% - 40px)); margin: 0 auto; padding: 42px 0 76px; }
+    .eyebrow, .kicker { color: #56645b; font: 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+    .eyebrow { display: flex; align-items: center; gap: 11px; }
+    .eyebrow::after { content: ""; width: 38px; height: 1px; background: #aeb7ab; }
+    .hero { display: flex; align-items: end; justify-content: space-between; gap: 28px; padding: 18px 0 31px; }
+    h1 { margin: 0; max-width: 700px; color: #2b3932; font: 500 clamp(40px, 6vw, 66px)/1.02 Georgia, "Times New Roman", serif; letter-spacing: -.035em; }
+    h1 em { color: #537260; font-weight: 400; }
+    .hero-copy { max-width: 420px; margin: 17px 0 0; color: #56645b; font-size: 14px; line-height: 1.7; }
+    .review-seal { flex: 0 0 78px; width: 78px; height: 78px; border: 1px solid #c4c8bc; border-radius: 50%; display: grid; place-items: center; color: #607667; text-align: center; font: 9px/1.45 var(--mono); letter-spacing: .07em; transform: rotate(-9deg); }
+    .version-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .version-card { position: relative; padding: 20px 22px; background: var(--paper); border: 1px solid #e0e1d9; border-top: 3px solid #6b8674; }
+    .version-card.newer { border-top-color: var(--gold); }
+    .version-card header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .version-card h2 { margin: 7px 0 10px; font: 500 21px Georgia, "Times New Roman", serif; }
+    .version-id { padding: 5px 7px; color: #596b5e; background: #edf1eb; font: 9px var(--mono); letter-spacing: .07em; }
+    .newer .version-id { color: #715a2c; background: var(--gold-soft); }
+    .version-meta { display: flex; flex-wrap: wrap; gap: 9px 18px; margin: 0; color: #657068; font-size: 11px; }
+    .version-meta b { display: block; margin-bottom: 4px; color: #56645b; font: 9px var(--mono); letter-spacing: .07em; }
+    .version-note { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid #ecece5; color: #56645b; font-size: 11px; line-height: 1.5; }
+    .section { margin-top: 38px; }
+    .section-head { display: flex; justify-content: space-between; align-items: end; gap: 14px; margin-bottom: 15px; }
+    .section-head h2 { margin: 6px 0 0; color: #2c3832; font: 500 25px Georgia, "Times New Roman", serif; }
+    .section-aside { color: #56645b; font: 9px var(--mono); letter-spacing: .08em; text-align: right; }
+    .comparison-layout { display: grid; grid-template-columns: 310px minmax(0, 1fr); gap: 17px; align-items: start; }
+    .candidate-list { display: grid; gap: 8px; }
+    .candidate-button { width: 100%; padding: 13px; border: 1px solid #dedfd7; background: #faf9f4; color: var(--ink); text-align: left; cursor: pointer; transition: border-color .15s, background .15s, transform .15s; }
+    .candidate-button:hover { border-color: #aab5a9; transform: translateY(-1px); }
+    .candidate-button[aria-pressed="true"] { border-color: #62806c; background: #e9eee8; box-shadow: inset 3px 0 #50705d; }
+    .candidate-top { display: flex; justify-content: space-between; align-items: start; gap: 8px; }
+    .candidate-number { color: #56645b; font: 9px var(--mono); }
+    .candidate-kind { color: #506759; font: 9px var(--mono); letter-spacing: .045em; text-align: right; }
+    .candidate-name { display: block; margin: 8px 0 10px; font: 500 16px Georgia, "Times New Roman", serif; }
+    .proposal-label { display: inline-block; padding: 5px 6px; border: 1px solid #e4d8b9; background: var(--gold-soft); color: #614f2b; font: 8px var(--mono); letter-spacing: .055em; }
+    .detail-card { min-height: 430px; padding: 22px; background: var(--paper); border: 1px solid #e0e1d9; }
+    .detail-top { display: flex; justify-content: space-between; align-items: start; gap: 14px; }
+    .detail-top h3 { margin: 6px 0 0; color: #2b3932; font: 500 25px Georgia, "Times New Roman", serif; }
+    .detail-summary { margin: 15px 0 17px; color: #56645b; font-size: 12px; line-height: 1.65; }
+    .evidence-heading { display: flex; justify-content: space-between; align-items: end; gap: 12px; margin: 19px 0 9px; padding-top: 14px; border-top: 1px solid #e9e9e2; }
+    .evidence-heading h4 { margin: 5px 0 0; font: 500 16px Georgia, "Times New Roman", serif; }
+    .semantic-flag { color: #8a682e; font: 8px var(--mono); letter-spacing: .06em; text-align: right; }
+    .quote-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .quote-card { min-width: 0; padding: 12px 13px; background: #f8f7f2; border: 1px solid #e6e5dc; }
+    .quote-card .quote-version { display: flex; justify-content: space-between; gap: 8px; color: #56645b; font: 9px var(--mono); }
+    .quote-card blockquote { margin: 11px 0 8px; color: #35433a; font: italic 14px/1.55 Georgia, "Times New Roman", serif; }
+    .quote-card .citation { color: #56645b; font: 9px var(--mono); line-height: 1.5; overflow-wrap: anywhere; }
+    .semantic-note { margin-top: 9px; padding: 10px 11px; background: #f5f0e4; border-left: 2px solid #b28d4b; color: #675431; font-size: 11px; line-height: 1.5; }
+    .uncertainty-box { margin-top: 15px; padding: 12px 13px; border: 1px solid #e3e0d5; background: #fbfaf6; }
+    .uncertainty-box h4 { margin: 0 0 6px; color: #735d34; font: 10px var(--mono); letter-spacing: .07em; }
+    .uncertainty-box p { margin: 0; color: #69736b; font-size: 11px; line-height: 1.55; }
+    .impact-card { margin-top: 17px; padding-top: 15px; border-top: 1px solid #e9e9e2; }
+    .impact-card h4 { margin: 0 0 9px; font: 500 16px Georgia, "Times New Roman", serif; }
+    .impact-list { display: flex; flex-wrap: wrap; gap: 7px; }
+    .impact-chip { padding: 7px 9px; border: 1px solid #dfe4dc; background: #edf1eb; color: #4f6756; font-size: 10px; }
+    .impact-chip b { display: block; margin-top: 4px; color: #56645b; font: 8px var(--mono); font-weight: 400; }
+    .impact-disclaimer { margin: 9px 0 0; color: #56645b; font-size: 10px; line-height: 1.5; }
+    .review-panel { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 18px; margin-top: 30px; padding: 19px 21px; border: 1px solid #d8ded5; background: #e9eee8; }
+    .review-panel h2 { margin: 5px 0; font: 500 20px Georgia, "Times New Roman", serif; }
+    .review-panel p { max-width: 680px; margin: 0; color: #56645b; font-size: 11px; line-height: 1.55; }
+    .review-stamp { padding: 9px 10px; border: 1px solid #a6b5a7; color: #47644f; font: 9px var(--mono); letter-spacing: .06em; text-align: center; }
+    .api-panel { padding: 18px 20px; border: 1px solid #d8ded5; background: #fffefa; }
+    .api-panel h2 { margin: 5px 0 8px; font: 500 20px Georgia, "Times New Roman", serif; }
+    .api-panel p { max-width: 760px; color: #56645b; font-size: 12px; line-height: 1.6; }
+    .api-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+    .api-run { min-height: 42px; padding: 10px 15px; border: 1px solid #285b48; background: #285b48; color: #fff; font-weight: 700; cursor: pointer; }
+    .api-run:hover:not(:disabled) { background: #1f4939; }
+    .api-run:disabled { opacity: .65; cursor: wait; }
+    .api-status { margin: 0; }
+    .api-result { margin-top: 16px; padding: 16px; border-left: 3px solid #a78346; background: #f8f7f2; }
+    .api-result[hidden] { display: none; }
+    .api-result h3 { margin: 0 0 8px; font: 500 20px Georgia, "Times New Roman", serif; }
+    .api-result h4 { margin: 14px 0 6px; font: 600 13px Arial, sans-serif; }
+    .api-result p { margin: 6px 0; }
+    .api-result blockquote { margin: 8px 0; padding-left: 12px; border-left: 2px solid #aeb7ab; color: #35433a; font: italic 14px/1.55 Georgia, "Times New Roman", serif; overflow-wrap: anywhere; }
+    .api-citation-meta { color: #56645b; font: 10px/1.55 var(--mono); overflow-wrap: anywhere; }
+    .api-disclaimer { font-weight: 700; color: #4d4026 !important; }
+    footer { max-width: 1180px; margin: 0 auto; padding: 18px 26px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: #56645b; font: 9px var(--mono); letter-spacing: .08em; }
+    @media (max-width: 780px) {
+      main { width: min(100% - 30px, 640px); padding-top: 31px; }
+      .header-row { padding: 0 16px; }
+      .version-grid { gap: 9px; }
+      .version-card { padding: 16px; }
+      .comparison-layout { grid-template-columns: 1fr; }
+      .candidate-list { grid-template-columns: 1fr 1fr; }
+      .candidate-button { min-height: 115px; }
+    }
+    @media (max-width: 520px) {
+      .header-row { height: 56px; }
+      .local-label { font-size: 8px; }
+      .disclaimer { padding: 9px 13px; font-size: 10px; }
+      main { width: calc(100% - 28px); padding-top: 26px; }
+      .hero { padding-bottom: 24px; }
+      .hero h1 { font-size: 43px; }
+      .hero-copy { font-size: 12px; }
+      .review-seal { display: none; }
+      .version-grid { grid-template-columns: 1fr; }
+      .section-head { align-items: start; }
+      .section-aside { max-width: 130px; line-height: 1.5; }
+      .candidate-list { grid-template-columns: 1fr; }
+      .candidate-button { min-height: 0; }
+      .detail-card { padding: 16px; }
+      .quote-grid { grid-template-columns: 1fr; }
+      .review-panel { grid-template-columns: 1fr; }
+      .review-stamp { justify-self: start; }
+      footer { padding: 16px; flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-row">
+      <a class="brand" href="#main" aria-label="Story Connect policy comparison demo home"><span class="brand-mark" aria-hidden="true">S</span><span>STORY <i>CONNECT</i></span></a>
+      <span class="local-label">OFFLINE CONCEPT DEMO</span>
+    </div>
+    <div class="disclaimer" role="note" aria-label="Synthetic demo disclaimer">
+      <span class="disclaimer-mark" aria-hidden="true">✳</span>
+      <span>Synthetic demo — proposals only. No independently verified policy findings.</span>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="eyebrow">POLICY REVIEW / SYNTHETIC HOTEL EXAMPLE</div>
+    <section class="hero" aria-labelledby="page-title">
+      <div>
+        <h1 id="page-title">See what changed.<br><em>Keep the decision human.</em></h1>
+        <p class="hero-copy">Compare two fictional policy versions, inspect the exact source excerpts, and review possible conflicts or impacts. Every label below is a candidate for human review, not a finding.</p>
+      </div>
+      <div class="review-seal" aria-hidden="true">HUMAN<br>REVIEW<br>REQUIRED</div>
+    </section>
+
+    <section aria-labelledby="versions-title">
+      <div class="section-head"><div><span class="kicker">01 — VERSION PAIR</span><h2 id="versions-title">Guest request handover</h2></div><span class="section-aside">SYNTHETIC POLICY<br>NO REAL HOTEL DATA</span></div>
+      <div class="version-grid">
+        <article class="version-card">
+          <header><span class="kicker">EARLIER VERSION</span><span class="version-id">SYN-HANDOVER · V1</span></header>
+          <h2>Handover standard</h2>
+          <div class="version-meta">
+            <span><b>EFFECTIVE</b>01 Jan 2026</span>
+          <span><b>THROUGH</b>30 Sep 2026</span>
+            <span><b>STATED SCOPE</b>Front Office</span>
+          </div>
+          <p class="version-note">Synthetic fixture text. Dates and scope are illustrative inputs, not an approved precedence rule.</p>
+        </article>
+        <article class="version-card newer">
+          <header><span class="kicker">LATER VERSION</span><span class="version-id">SYN-HANDOVER · V2</span></header>
+          <h2>Handover standard</h2>
+          <div class="version-meta">
+            <span><b>EFFECTIVE</b>01 Jul 2026</span>
+            <span><b>THROUGH</b>31 Dec 2026</span>
+            <span><b>STATED SCOPE</b>Front Office + Housekeeping</span>
+          </div>
+          <p class="version-note">Synthetic fixture text. Overlap, priority, or operational effect has not been independently established.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section api-panel" aria-labelledby="api-title">
+      <span class="kicker">LOCAL API · SYNTHETIC INPUT ONLY</span>
+      <h2 id="api-title">Inspect the same example through the local policy API</h2>
+      <p>The endpoint uses a fixed offline fixture and returns an inconclusive proposal. Your static examples below remain available if the local API is stopped.</p>
+      <div class="api-action-row">
+        <button id="run-api-comparison" class="api-run" type="button" aria-describedby="api-status">Run local comparison</button>
+        <p id="api-status" class="api-status" role="status" aria-live="polite">Not connected. No request has been sent.</p>
+      </div>
+      <div id="api-result" class="api-result" role="region" aria-label="Local API comparison result" aria-live="polite" hidden></div>
+    </section>
+
+    <section class="section" aria-labelledby="changes-title">
+      <div class="section-head"><div><span class="kicker">02 — CANDIDATE REVIEW</span><h2 id="changes-title">Proposed changes</h2></div><span class="section-aside">SELECT A CANDIDATE<br>TO INSPECT ITS SOURCES</span></div>
+      <div class="comparison-layout">
+        <nav class="candidate-list" id="candidate-list" aria-label="Proposed policy change candidates"></nav>
+        <article class="detail-card" id="candidate-detail" aria-live="polite" aria-atomic="true"></article>
+      </div>
+    </section>
+
+    <section class="review-panel" aria-labelledby="review-title">
+      <div><span class="kicker">03 — HUMAN REVIEW</span><h2 id="review-title">A policy owner must make the decision.</h2><p>This concept does not approve, amend, or publish official policy. A reviewer would need to verify the source, interpret scope and effective dates, assess evidence, and decide what action—if any—is appropriate.</p></div>
+      <div class="review-stamp">REVIEW<br>REQUIRED</div>
+    </section>
+  </main>
+  <footer><span>STORY CONNECT · POLICY COMPARISON</span><span>LOCAL SYNTHETIC FIXTURES · NO SAVED STATE</span></footer>
+
+  <script>
+    "use strict";
+    const candidates = [
+      {
+        kind: "CONTRADICTION", title: "When should the request be recorded?", summary: "The two excerpts appear to point to different recording times. This is a proposed contradiction only; scope, precedence, and semantic support have not been verified.",
+        older: { quote: "Front Office must record each guest request before the shift ends.", citation: "SYN-HANDOVER:V1 · paragraph 1 · exact synthetic excerpt" },
+        newer: { quote: "Front Office must not record guest requests until the next shift begins.", citation: "SYN-HANDOVER:V2 · paragraph 1 · exact synthetic excerpt" },
+        uncertainty: "The illustrative dates overlap, but overlap alone does not prove these rules conflict. Semantic support, applicability, and precedence remain unverified and require policy-owner review.",
+        impacts: [{ name: "Front Office", type: "Department proposal", version: "V1 + V2" }, { name: "Guest request handover", type: "Procedure proposal", version: "V1 + V2" }]
+      },
+      {
+        kind: "COMPATIBLE_CHANGE", title: "A wording update for prompt recording", summary: "The phrasing appears similar in intent. Compatibility is a candidate interpretation, not a verified conclusion.",
+        older: { quote: "Team members should promptly enter guest requests in the handover log.", citation: "SYN-HANDOVER:V1 · paragraph 2 · exact synthetic excerpt" },
+        newer: { quote: "Staff should enter guest requests in the handover log without delay.", citation: "SYN-HANDOVER:V2 · paragraph 2 · exact synthetic excerpt" },
+        uncertainty: "Similar wording does not prove equivalent meaning. A policy owner must check definitions, required timing, exceptions, and actual scope.",
+        impacts: [{ name: "Front Office", type: "Department proposal", version: "V1 + V2" }]
+      },
+      {
+        kind: "NEW_RULE", title: "Supervisor review of unresolved requests", summary: "A later-version excerpt adds a review step that is not shown in this earlier excerpt. Full-document comparison has not been verified, so this remains a new-rule proposal.",
+        older: { quote: "Handover records should include unresolved guest requests.", citation: "SYN-HANDOVER:V1 · paragraph 3 · exact synthetic excerpt" },
+        newer: { quote: "A supervisor reviews unresolved requests at the start of the next shift.", citation: "SYN-HANDOVER:V2 · paragraph 3 · exact synthetic excerpt" },
+        uncertainty: "Only these excerpts are represented here. The earlier full policy may contain a similar requirement; caller-provided coverage labels would not prove absence.",
+        impacts: [{ name: "Shift supervisors", type: "Department proposal", version: "V2" }, { name: "Opening shift review", type: "Procedure proposal", version: "V2" }]
+      },
+      {
+        kind: "SCOPE_OR_TIME_DIFFERENCE", title: "A rule with a different stated scope or period", summary: "The examples carry different scope and effective-period metadata. The interface does not decide which text takes precedence or whether operations changed.",
+        older: { quote: "Front Office reviews open requests at shift change.", citation: "SYN-HANDOVER:V1 · paragraph 4 · exact synthetic excerpt" },
+        newer: { quote: "Housekeeping reports unresolved room requests before rounds begin.", citation: "SYN-HANDOVER:V2 · paragraph 4 · exact synthetic excerpt" },
+        uncertainty: "Department and effective-date metadata are illustrative. A domain owner must determine whether the scopes overlap and how these rules relate.",
+        impacts: [{ name: "Front Office", type: "Department proposal", version: "V1" }, { name: "Housekeeping", type: "Department proposal", version: "V2" }]
+      }
+    ];
+
+    const API_URL = "http://127.0.0.1:8082/policy-comparisons";
+    const API_MAX_REQUEST_BYTES = 512000;
+    const API_MAX_RESPONSE_BYTES = 128000;
+    const API_TIMEOUT_MS = 8000;
+    const SYNTHETIC_PAIR = {
+      schema_version: 1,
+      comparison_id: "cmp-syn-ui-001",
+      older: {
+        document_id: "syn-policy-handover",
+        version_id: "v1",
+        original_text: "Front Office must record each guest request before the shift ends.",
+        effective_from: "2026-01-01",
+        effective_to_exclusive: "2026-10-01",
+        scope: {
+          departments: { state: "KNOWN", ids: ["FRONT_OFFICE"] },
+          procedures: { state: "UNKNOWN", ids: [] },
+          property_id: null,
+          evidence_passage_ids: ["p000001-5fe04935d65006af"]
+        },
+        text_coverage: "EXCERPT",
+        impact_dependencies: []
+      },
+      newer: {
+        document_id: "syn-policy-handover",
+        version_id: "v2",
+        original_text: "Front Office must not record guest requests until the next shift begins.",
+        effective_from: "2026-07-01",
+        effective_to_exclusive: "2027-01-01",
+        scope: {
+          departments: { state: "KNOWN", ids: ["FRONT_OFFICE", "HOUSEKEEPING"] },
+          procedures: { state: "UNKNOWN", ids: [] },
+          property_id: null,
+          evidence_passage_ids: ["p000001-010f660c9c5025e4"]
+        },
+        text_coverage: "EXCERPT",
+        impact_dependencies: []
+      }
+    };
+    const EXPECTED_SOURCES = {
+      OLDER: {
+        documentId: "syn-policy-handover",
+        versionId: "v1",
+        sourceHash: "5fe04935d65006af7e5558d4d221fb1cd2a7dae24780dfc1f39102fbff43cc0d",
+        passageId: "p000001-5fe04935d65006af",
+        quote: SYNTHETIC_PAIR.older.original_text
+      },
+      NEWER: {
+        documentId: "syn-policy-handover",
+        versionId: "v2",
+        sourceHash: "010f660c9c5025e4c5a9693f26dc1274953ba0e24588c8b5201474640fe6f403",
+        passageId: "p000001-010f660c9c5025e4",
+        quote: SYNTHETIC_PAIR.newer.original_text
+      }
+    };
+    const ALLOWED_RELATIONS = new Set([
+      "CONTRADICTION", "COMPATIBLE_CHANGE", "NEW_RULE",
+      "SCOPE_OR_TIME_DIFFERENCE", "INCONCLUSIVE"
+    ]);
+    const UNCERTAINTY_LABELS = {
+      missing_evidence: "Evidence is insufficient for an assessment.",
+      semantic_support_unverified: "Semantic support is not verified."
+    };
+
+    function makeElement(tag, className, text) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined) element.textContent = text;
+      return element;
+    }
+
+    function makeQuoteCard(label, citation) {
+      const card = makeElement("section", "quote-card");
+      card.setAttribute("aria-label", `${label} source excerpt`);
+      const version = makeElement("div", "quote-version");
+      version.append(
+        makeElement("span", "", label),
+        makeElement("span", "", "SYNTHETIC")
+      );
+      const quote = makeElement("blockquote", "", `“${citation.quote}”`);
+      const metadata = makeElement(
+        "div",
+        "citation",
+        `Exact source match · ${citation.document_id} · ${citation.version_id} · ${citation.passage_id} · ${citation.start_cp}–${citation.end_cp} · SHA-256 ${citation.source_sha256}`
+      );
+      card.append(version, quote, metadata);
+      return card;
+    }
+
+    function makeStaticQuoteCard(label, excerpt) {
+      const card = makeElement("section", "quote-card");
+      card.setAttribute("aria-label", `${label} source excerpt`);
+      const version = makeElement("div", "quote-version");
+      version.append(makeElement("span", "", label), makeElement("span", "", "SYNTHETIC"));
+      card.append(
+        version,
+        makeElement("blockquote", "", `“${excerpt.quote}”`),
+        makeElement("div", "citation", excerpt.citation)
+      );
+      return card;
+    }
+
+    const list = document.getElementById("candidate-list");
+    const detail = document.getElementById("candidate-detail");
+    function showCandidate(index) {
+      const item = candidates[index];
+      if (!item) return;
+      list.querySelectorAll("button").forEach((button, buttonIndex) => {
+        button.setAttribute("aria-pressed", String(buttonIndex === index));
+      });
+
+      const top = makeElement("div", "detail-top");
+      const titleGroup = makeElement("div");
+      titleGroup.append(
+        makeElement("span", "kicker", "PROPOSED CLASSIFICATION"),
+        makeElement("h3", "", item.title)
+      );
+      top.append(titleGroup, makeElement("span", "proposal-label", "PROPOSED — NOT VERIFIED"));
+      const summary = makeElement("p", "detail-summary", item.summary);
+
+      const evidenceHeading = makeElement("div", "evidence-heading");
+      const evidenceTitle = makeElement("div");
+      evidenceTitle.append(
+        makeElement("span", "kicker", "SOURCE EXCERPTS"),
+        makeElement("h4", "", "Exact source citation")
+      );
+      evidenceHeading.append(
+        evidenceTitle,
+        makeElement("span", "semantic-flag", "SEMANTIC SUPPORT · NOT VERIFIED")
+      );
+      const quotes = makeElement("div", "quote-grid");
+      quotes.append(
+        makeStaticQuoteCard("EARLIER · V1", item.older),
+        makeStaticQuoteCard("LATER · V2", item.newer)
+      );
+      const semanticNote = makeElement("div", "semantic-note");
+      semanticNote.append(
+        makeElement("strong", "", "Exact source citation"),
+        document.createTextNode(" means this synthetic quotation is displayed as supplied in the fixture. It does not establish semantic support for the proposed classification.")
+      );
+      const uncertainty = makeElement("section", "uncertainty-box");
+      uncertainty.setAttribute("aria-labelledby", "uncertainty-heading");
+      const uncertaintyTitle = makeElement("h4", "", "WHY THIS REMAINS UNCERTAIN");
+      uncertaintyTitle.id = "uncertainty-heading";
+      uncertainty.append(
+        uncertaintyTitle,
+        makeElement("p", "", item.uncertainty)
+      );
+      const impactCard = makeElement("section", "impact-card");
+      impactCard.setAttribute("aria-labelledby", "impact-heading");
+      const impactHeading = makeElement("h4", "");
+      impactHeading.id = "impact-heading";
+      impactHeading.append(
+        document.createTextNode("Proposed impact areas "),
+        makeElement("span", "proposal-label", "PROPOSALS ONLY")
+      );
+      const impactList = makeElement("div", "impact-list");
+      item.impacts.forEach((impact) => {
+        const chip = makeElement("span", "impact-chip", impact.name);
+        chip.append(makeElement("b", "", `${impact.type} · SOURCE ${impact.version}`));
+        impactList.append(chip);
+      });
+      impactCard.append(
+        impactHeading,
+        impactList,
+        makeElement("p", "impact-disclaimer", "These synthetic impact links are proposals only. No department or procedure is confirmed to be affected.")
+      );
+      detail.replaceChildren(top, summary, evidenceHeading, quotes, semanticNote, uncertainty, impactCard);
+    }
+
+    candidates.forEach((item, index) => {
+      const button = makeElement("button", "candidate-button");
+      button.type = "button";
+      button.setAttribute("aria-pressed", "false");
+      button.setAttribute("aria-controls", "candidate-detail");
+      const top = makeElement("span", "candidate-top");
+      top.append(
+        makeElement("span", "candidate-number", `${String(index + 1).padStart(2, "0")} / ${String(candidates.length).padStart(2, "0")}`),
+        makeElement("span", "candidate-kind", item.kind)
+      );
+      button.append(
+        top,
+        makeElement("span", "candidate-name", item.title),
+        makeElement("span", "proposal-label", "PROPOSED — NOT VERIFIED")
+      );
+      button.addEventListener("click", () => showCandidate(index));
+      list.append(button);
+    });
+    showCandidate(0);
+
+    const apiButton = document.getElementById("run-api-comparison");
+    const apiStatus = document.getElementById("api-status");
+    const apiResult = document.getElementById("api-result");
+    let comparisonInFlight = false;
+
+    class InvalidApiResponse extends Error {}
+    class ApiHttpFailure extends Error {
+      constructor(status) {
+        super();
+        this.status = status;
+      }
+    }
+
+    function isRecord(value) {
+      return value !== null && typeof value === "object" && !Array.isArray(value);
+    }
+
+    async function readBoundedJson(response) {
+      const contentLength = response.headers.get("content-length");
+      if (contentLength && /^\d+$/.test(contentLength) && Number(contentLength) > API_MAX_RESPONSE_BYTES) {
+        throw new InvalidApiResponse();
+      }
+      if (!response.body) throw new InvalidApiResponse();
+      const reader = response.body.getReader();
+      const chunks = [];
+      let size = 0;
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        size += part.value.byteLength;
+        if (size > API_MAX_RESPONSE_BYTES) {
+          try { await reader.cancel(); } catch (_) { /* fixed local rejection */ }
+          throw new InvalidApiResponse();
+        }
+        chunks.push(part.value);
+      }
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      chunks.forEach((chunk) => {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      });
+      try {
+        return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+      } catch (_) {
+        throw new InvalidApiResponse();
+      }
+    }
+
+    function validateApiCitation(citation) {
+      if (!isRecord(citation) || !Object.prototype.hasOwnProperty.call(EXPECTED_SOURCES, citation.role)) {
+        throw new InvalidApiResponse();
+      }
+      const expected = EXPECTED_SOURCES[citation.role];
+      if (citation.document_id !== expected.documentId ||
+          citation.version_id !== expected.versionId ||
+          citation.source_sha256 !== expected.sourceHash ||
+          citation.passage_id !== expected.passageId ||
+          !Number.isSafeInteger(citation.start_cp) || citation.start_cp !== 0 ||
+          !Number.isSafeInteger(citation.end_cp) || citation.end_cp !== expected.quote.length ||
+          citation.quote !== expected.quote) {
+        throw new InvalidApiResponse();
+      }
+      return citation;
+    }
+
+    function validateApiPayload(payload) {
+      if (!isRecord(payload) || payload.schema_version !== 1 ||
+          payload.comparison_id !== SYNTHETIC_PAIR.comparison_id ||
+          !Array.isArray(payload.results) || payload.results.length > 20) {
+        throw new InvalidApiResponse();
+      }
+      payload.results.forEach((result) => {
+        if (!isRecord(result) || result.classification !== "INCONCLUSIVE" ||
+            result.assessment_status !== "INCONCLUSIVE" ||
+            !ALLOWED_RELATIONS.has(result.proposed_classification) ||
+            typeof result.summary !== "string" || result.summary.length > 1_000 ||
+            result.human_review_required !== true || result.official_policy_mutated !== false ||
+            result.proposal_status !== "PROPOSAL_ONLY" ||
+            result.proposal_semantic_support !== "NOT_VERIFIED" ||
+            !Array.isArray(result.proposal_uncertainty_reasons) ||
+            result.proposal_uncertainty_reasons.length > 8 ||
+            result.proposal_uncertainty_reasons.length === 0 ||
+            result.proposal_uncertainty_reasons.some((reason) => !Object.prototype.hasOwnProperty.call(UNCERTAINTY_LABELS, reason)) ||
+            !isRecord(result.evidence_checks) || result.evidence_checks.source_spans !== "VALID" ||
+            result.evidence_checks.semantic_assessment_origin !== "UNTRUSTED_CALLER_ASSERTION" ||
+            !isRecord(result.impact) || result.impact.status !== "INCONCLUSIVE" ||
+            !Array.isArray(result.impact.departments) || result.impact.departments.length !== 0 ||
+            !Array.isArray(result.impact.procedures) || result.impact.procedures.length !== 0 ||
+            !Array.isArray(result.impact.citations) || result.impact.citations.length !== 0 ||
+            !Array.isArray(result.impact.proposed_targets) || result.impact.proposed_targets.length !== 0 ||
+            !Array.isArray(result.citations) || result.citations.length !== 2) {
+          throw new InvalidApiResponse();
+        }
+        const citations = result.citations.map(validateApiCitation);
+        if (new Set(citations.map((citation) => citation.role)).size !== 2 ||
+            !citations.some((citation) => citation.role === "OLDER") ||
+            !citations.some((citation) => citation.role === "NEWER")) {
+          throw new InvalidApiResponse();
+        }
+      });
+      return payload;
+    }
+
+    function renderApiResults(payload) {
+      apiResult.replaceChildren();
+      if (payload.results.length === 0) {
+        apiResult.append(makeElement("p", "", "The local API returned no proposals. The static synthetic examples remain available."));
+        apiResult.hidden = false;
+        return;
+      }
+      payload.results.forEach((result, index) => {
+        const card = makeElement("section", "api-result-item");
+        card.append(
+          makeElement("h3", "", `Returned classification: ${result.classification}`),
+          makeElement("p", "api-disclaimer", "INCONCLUSIVE · PROPOSAL ONLY · HUMAN REVIEW REQUIRED"),
+          makeElement("p", "", `Proposed relation (not verified): ${result.proposed_classification}`),
+          makeElement("p", "", result.summary)
+        );
+        const reasonHeading = makeElement("h4", "", "Uncertainty");
+        const reasons = makeElement("ul");
+        result.proposal_uncertainty_reasons.forEach((reason) => {
+          reasons.append(makeElement("li", "", UNCERTAINTY_LABELS[reason]));
+        });
+        card.append(reasonHeading, reasons, makeElement("h4", "", "Exact fixture citations"));
+        result.citations.forEach((citation) => {
+          const sourceName = citation.role === "OLDER" ? "Earlier version · V1" : "Later version · V2";
+          const citationCard = makeElement("div", "quote-card");
+          citationCard.append(
+            makeElement("div", "quote-version", sourceName),
+            makeElement("blockquote", "", `“${citation.quote}”`),
+            makeElement("div", "api-citation-meta", `${citation.document_id} · ${citation.version_id} · ${citation.passage_id} · code-point offsets ${citation.start_cp}–${citation.end_cp} · SHA-256 ${citation.source_sha256}`),
+            makeElement("p", "", "Citation text and hash match the known synthetic fixture. This does not establish semantic support.")
+          );
+          card.append(citationCard);
+        });
+        card.append(
+          makeElement("h4", "", "Impact assessment: INCONCLUSIVE"),
+          makeElement("p", "", "This fixture returned no proposed impacts. No department or procedure is confirmed to be affected.")
+        );
+        apiResult.append(card);
+      });
+      apiResult.hidden = false;
+    }
+
+    function httpFailureMessage(status) {
+      if (status === 413) return "The local API rejected the request size. The static synthetic examples remain available.";
+      if (status === 400 || status === 415 || status === 422) return "The local API rejected this synthetic request. The static examples remain available.";
+      return "The local API returned an error. The static synthetic examples remain available.";
+    }
+
+    async function runApiComparison() {
+      if (comparisonInFlight) return;
+      comparisonInFlight = true;
+      apiButton.disabled = true;
+      apiButton.setAttribute("aria-busy", "true");
+      apiResult.replaceChildren();
+      apiResult.hidden = true;
+      apiStatus.textContent = "Sending the fixed synthetic example to the local API…";
+      let timedOut = false;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, API_TIMEOUT_MS);
+      try {
+        const body = JSON.stringify(SYNTHETIC_PAIR);
+        if (new TextEncoder().encode(body).byteLength > API_MAX_REQUEST_BYTES) {
+          throw new InvalidApiResponse();
+        }
+        const response = await fetch(API_URL, {
+          method: "POST",
+          mode: "cors",
+          credentials: "omit",
+          cache: "no-store",
+          redirect: "error",
+          headers: { "Content-Type": "application/json" },
+          body,
+          signal: controller.signal
+        });
+        if (!response.ok) throw new ApiHttpFailure(response.status);
+        const payload = validateApiPayload(await readBoundedJson(response));
+        renderApiResults(payload);
+        apiStatus.textContent = payload.results.length === 0
+          ? "The API response was empty; the static synthetic examples remain available."
+          : `Local API returned ${payload.results.length} inconclusive proposal${payload.results.length === 1 ? "" : "s"}. Human review is required.`;
+      } catch (error) {
+        if (timedOut || (error && error.name === "AbortError")) {
+          apiStatus.textContent = "The local API request timed out. The static synthetic examples remain available.";
+        } else if (error instanceof ApiHttpFailure) {
+          apiStatus.textContent = httpFailureMessage(error.status);
+        } else if (error instanceof InvalidApiResponse) {
+          apiStatus.textContent = "The local API response could not be verified. The static synthetic examples remain available.";
+        } else if (error instanceof TypeError) {
+          apiStatus.textContent = "The local policy API is unavailable or unreachable. The static synthetic examples remain available.";
+        } else {
+          apiStatus.textContent = "The local comparison could not be completed. The static synthetic examples remain available.";
+        }
+      } finally {
+        window.clearTimeout(timeout);
+        comparisonInFlight = false;
+        apiButton.disabled = false;
+        apiButton.removeAttribute("aria-busy");
+      }
+    }
+
+    apiButton.addEventListener("click", runApiComparison);
+  </script>
+</body>
+</html>

@@ -1,0 +1,255 @@
+{
+  "title": "Story Connect synthetic evidence gold set",
+  "version": 1,
+  "labeling_note": "Gold stances and statuses were assigned from the synthetic source text and stated evaluation question before running the engine. They are fixture judgments, not engine-derived labels or evidence of real-world performance.",
+  "cases": [
+    {
+      "id": "supportive-direct",
+      "provider_mode": "mock",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does this record directly support checklist unavailability?",
+      "records": [{"id": "OPS-101", "timestamp": "2026-10-20T06:05:00Z", "department": "Front Office", "text": "Night checklist binder was missing from the desk; we wrote room 412's late arrival on a loose note.", "tags": ["checklist", "late-arrival"]}],
+      "expected_stances": ["SUPPORTS"],
+      "expected_status": "PARTIAL",
+      "explanation": "The binder is explicitly described as missing. One fresh supporting source is relevant but not enough to establish a recurring cause."
+    },
+    {
+      "id": "contradictory-direct",
+      "provider_mode": "mock",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does this record contradict checklist unavailability?",
+      "records": [{"id": "OPS-102", "timestamp": "2026-10-20T14:12:00Z", "department": "Front Office", "text": "The digital checklist opened normally on both desk terminals during the afternoon handover.", "tags": ["checklist", "pms"]}],
+      "expected_stances": ["CONTRADICTS"],
+      "expected_status": "CONTRADICTED",
+      "explanation": "The record directly says checklist access worked during that handover. It contradicts this hypothesis for this instance, not every instance."
+    },
+    {
+      "id": "neutral-related-record",
+      "provider_mode": "mock",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does a room-readiness mismatch establish checklist availability?",
+      "records": [{"id": "OPS-108", "timestamp": "2026-10-23T14:07:00Z", "department": "Housekeeping", "text": "The handover sheet listed two rooms as ready, but the next shift found both still awaiting inspection.", "tags": ["handover", "conflict"]}],
+      "expected_stances": ["NEUTRAL"],
+      "expected_status": "INSUFFICIENT",
+      "explanation": "The record describes a room-status mismatch but does not establish whether the checklist was available. Neutral evidence is neither support nor contradiction."
+    },
+    {
+      "id": "exact-quote-semantically-irrelevant",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does a lamp repair support checklist unavailability?",
+      "records": [{"id": "OPS-111", "timestamp": "2026-10-24T14:00:00Z", "department": "Maintenance", "text": "A guest called about a lamp; maintenance repaired it before the evening handover.", "tags": ["maintenance"]}],
+      "fixture_output": [{"source_record_id": "OPS-111", "quote": "A guest called about a lamp; maintenance repaired it before the evening handover.", "stance": "SUPPORTS", "rationale": "A deliberately incorrect synthetic proposal for semantic review."}],
+      "expected_stances": ["NEUTRAL"],
+      "expected_status": "INSUFFICIENT",
+      "semantic_review": true,
+      "explanation": "The quote is an exact source substring but says nothing about checklist availability. The deliberately incorrect SUPPORTS proposal tests a semantic failure that deterministic quote validation cannot detect."
+    },
+    {
+      "id": "stale-support",
+      "provider_mode": "mock",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does this old record support checklist unavailability as current evidence?",
+      "records": [{"id": "OPS-109", "timestamp": "2025-01-03T09:00:00Z", "department": "Front Office", "text": "A printed checklist was unavailable during the morning shift last winter.", "tags": ["checklist", "stale"]}],
+      "expected_stances": ["SUPPORTS"],
+      "expected_status": "INSUFFICIENT",
+      "explanation": "The historical statement supports the event described but is more than 90 days old and cannot count as current evidence."
+    },
+    {
+      "id": "conflicting-fresh-sources",
+      "provider_mode": "mock",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Do fresh sources point both ways on checklist availability?",
+      "records": [
+        {"id": "OPS-101", "timestamp": "2026-10-20T06:05:00Z", "department": "Front Office", "text": "Night checklist binder was missing from the desk; we wrote room 412's late arrival on a loose note.", "tags": ["checklist", "late-arrival"]},
+        {"id": "OPS-102", "timestamp": "2026-10-20T14:12:00Z", "department": "Front Office", "text": "The digital checklist opened normally on both desk terminals during the afternoon handover.", "tags": ["checklist", "pms"]}
+      ],
+      "expected_stances": ["SUPPORTS", "CONTRADICTS"],
+      "expected_status": "PARTIAL",
+      "explanation": "One fresh source reports a missing binder and another reports working digital access. The conflict remains unresolved, so the status is partial."
+    },
+    {
+      "id": "empty-abstention",
+      "provider_mode": "mock",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does this unrelated maintenance record establish checklist availability?",
+      "records": [{"id": "OPS-111", "timestamp": "2026-10-24T14:00:00Z", "department": "Maintenance", "text": "A guest called about a lamp; maintenance repaired it before the evening handover.", "tags": ["maintenance"]}],
+      "expected_stances": [],
+      "expected_status": "INSUFFICIENT",
+      "explanation": "The provider abstains because this unrelated record has no relevant assertion. No evidence means insufficient, not contradiction."
+    },
+    {
+      "id": "unsupported-causation-overclaim",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "STAFFING_CONSTRAINTS",
+      "question": "Can this absence record prove staffing caused every omitted request?",
+      "records": [{"id": "OPS-105", "timestamp": "2026-10-22T06:00:00Z", "department": "Front Office", "text": "Two agents covered the desk while one colleague was absent; several guest requests were passed verbally.", "tags": ["staffing", "time-pressure"]}],
+      "fixture_output": [{"source_record_id": "OPS-105", "quote": "Two agents covered the desk while one colleague was absent; several guest requests were passed verbally.", "stance": "SUPPORTS", "rationale": "The record proves the absence caused the omissions.", "causal_claim": "The absence caused every omitted request."}],
+      "expected_rejection_code": "malformed_output",
+      "expected_stances": null,
+      "expected_status": null,
+      "explanation": "The proposal attempts to add a causal conclusion outside the provider contract. It must be rejected; temporal association alone does not prove causation."
+    },
+    {
+      "id": "malformed-provider-output",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does malformed provider output fail closed?",
+      "records": [{"id": "OPS-101", "timestamp": "2026-10-20T06:05:00Z", "department": "Front Office", "text": "Night checklist binder was missing from the desk; we wrote room 412's late arrival on a loose note.", "tags": ["checklist", "late-arrival"]}],
+      "fixture_output": {"source_record_id": "OPS-101", "quote": "binder was missing", "stance": "SUPPORTS", "rationale": "Not a list of proposals."},
+      "expected_rejection_code": "malformed_output",
+      "expected_stances": null,
+      "expected_status": null,
+      "explanation": "The provider response is an object where a list is required. The investigation must not be persisted with partial output."
+    },
+    {
+      "id": "unknown-source-id",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Are invented source IDs rejected?",
+      "records": [{"id": "OPS-101", "timestamp": "2026-10-20T06:05:00Z", "department": "Front Office", "text": "Night checklist binder was missing from the desk; we wrote room 412's late arrival on a loose note.", "tags": ["checklist", "late-arrival"]}],
+      "fixture_output": [{"source_record_id": "INVENTED-999", "quote": "binder was missing", "stance": "SUPPORTS", "rationale": "Invented source."}],
+      "expected_rejection_code": "invalid_source",
+      "expected_stances": null,
+      "expected_status": null,
+      "explanation": "The ID is not among the permitted input records, even though the text resembles a valid quote."
+    },
+    {
+      "id": "non-substring-quote",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Are fabricated or altered quotes rejected?",
+      "records": [{"id": "OPS-101", "timestamp": "2026-10-20T06:05:00Z", "department": "Front Office", "text": "Night checklist binder was missing from the desk; we wrote room 412's late arrival on a loose note.", "tags": ["checklist", "late-arrival"]}],
+      "fixture_output": [{"source_record_id": "OPS-101", "quote": "The checklist caused the missed arrival.", "stance": "SUPPORTS", "rationale": "Fabricated wording."}],
+      "expected_rejection_code": "invalid_quote",
+      "expected_stances": null,
+      "expected_status": null,
+      "explanation": "The quoted sentence is not an exact substring of the record and adds an unsupported causal assertion."
+    },
+    {
+      "id": "topic-only-no-support",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does a checklist mention establish that it was unavailable?",
+      "records": [{"id": "OPS-113", "timestamp": "2026-10-24T11:00:00Z", "department": "Front Office", "text": "The checklist was discussed during handover; all rooms were checked before sign-off.", "tags": ["checklist", "handover"]}],
+      "fixture_output": [{"source_record_id": "OPS-113", "quote": "The checklist was discussed during handover", "stance": "SUPPORTS", "rationale": "The checklist topic supports unavailability."}],
+      "semantic_review": true,
+      "expected_stances": ["NEUTRAL"],
+      "expected_status": "INSUFFICIENT",
+      "explanation": "Mentioning a checklist does not state that it was missing or inaccessible. The quote is valid provenance but supplies no relation to the availability hypothesis."
+    },
+    {
+      "id": "neutral-as-contradiction",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does an inspection mismatch contradict checklist unavailability?",
+      "records": [{"id": "OPS-108", "timestamp": "2026-10-23T14:07:00Z", "department": "Housekeeping", "text": "The handover sheet listed two rooms as ready, but the next shift found both still awaiting inspection.", "tags": ["handover", "conflict"]}],
+      "fixture_output": [{"source_record_id": "OPS-108", "quote": "The handover sheet listed two rooms as ready", "stance": "CONTRADICTS", "rationale": "The sheet existed, so unavailability is contradicted."}],
+      "semantic_review": true,
+      "expected_stances": ["NEUTRAL"],
+      "expected_status": "INSUFFICIENT",
+      "explanation": "A room-status mismatch says nothing about whether the checklist was available; neutral evidence is neither support nor contradiction."
+    },
+    {
+      "id": "causal-rationale-sanitized",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "STAFFING_CONSTRAINTS",
+      "question": "Does an absence support staffing constraints, and can it prove causation?",
+      "records": [{"id": "OPS-105", "timestamp": "2026-10-22T06:00:00Z", "department": "Front Office", "text": "Two agents covered the desk while one colleague was absent; several guest requests were passed verbally.", "tags": ["staffing", "time-pressure"]}],
+      "fixture_output": [{"source_record_id": "OPS-105", "quote": "one colleague was absent; several guest requests were passed verbally", "stance": "SUPPORTS", "rationale": "The absence caused the requests to be missed."}],
+      "expected_stances": ["SUPPORTS"],
+      "expected_status": "PARTIAL",
+      "explanation": "The record associates an absence with verbal request passing and supports staffing pressure as a possibility. It does not establish that the absence caused omissions; one source remains partial."
+    },
+    {
+      "id": "paraphrased-checklist-support",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does a paraphrased report support checklist unavailability?",
+      "records": [{"id": "OPS-114", "timestamp": "2026-10-24T07:00:00Z", "department": "Front Office", "text": "At shift change no one could locate the printed handover checklist, so arrivals were noted on paper.", "tags": ["checklist", "handover"]}],
+      "fixture_output": [{"source_record_id": "OPS-114", "quote": "no one could locate the printed handover checklist", "stance": "SUPPORTS", "rationale": "The checklist could not be located."}],
+      "semantic_review": true,
+      "expected_stances": ["SUPPORTS"],
+      "expected_status": "PARTIAL",
+      "explanation": "The quoted paraphrase directly says the printed handover checklist could not be found. One fresh source supports the availability hypothesis but is not enough to establish a recurring cause."
+    },
+    {
+      "id": "negated-checklist-unavailable",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does confirmation of checklist presence contradict unavailability?",
+      "records": [{"id": "OPS-115", "timestamp": "2026-10-24T08:00:00Z", "department": "Front Office", "text": "The checklist was not missing; staff used it throughout the morning shift.", "tags": ["checklist", "availability"]}],
+      "fixture_output": [{"source_record_id": "OPS-115", "quote": "The checklist was not missing", "stance": "CONTRADICTS", "rationale": "The record explicitly negates that the checklist was missing."}],
+      "semantic_review": true,
+      "expected_stances": ["CONTRADICTS"],
+      "expected_status": "CONTRADICTED",
+      "explanation": "The explicit negation says the checklist was not missing and reports its use. This contradicts unavailability for this instance, but does not prove availability at other times."
+    },
+    {
+      "id": "staffing-topic-neutral",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "STAFFING_CONSTRAINTS",
+      "question": "Does a staffing roster mention establish a staffing constraint?",
+      "records": [{"id": "OPS-116", "timestamp": "2026-10-24T09:00:00Z", "department": "Front Office", "text": "The staffing roster for next week was posted in the office before the morning briefing.", "tags": ["staffing", "roster"]}],
+      "fixture_output": [{"source_record_id": "OPS-116", "quote": "The staffing roster for next week was posted in the office", "stance": "SUPPORTS", "rationale": "The record concerns staffing."}],
+      "semantic_review": true,
+      "expected_stances": ["NEUTRAL"],
+      "expected_status": "INSUFFICIENT",
+      "explanation": "A roster being posted does not state that staffing was inadequate or constrained. The topic mention is neutral to the hypothesis."
+    },
+    {
+      "id": "alternative-wording-staffing-contradiction",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "STAFFING_CONSTRAINTS",
+      "question": "Does filled desk coverage contradict a staffing constraint?",
+      "records": [{"id": "OPS-117", "timestamp": "2026-10-24T10:00:00Z", "department": "Front Office", "text": "All desk positions were filled for the full overnight shift, and planned breaks were covered.", "tags": ["staffing", "coverage"]}],
+      "fixture_output": [{"source_record_id": "OPS-117", "quote": "All desk positions were filled for the full overnight shift", "stance": "CONTRADICTS", "rationale": "Coverage was complete."}],
+      "semantic_review": true,
+      "expected_stances": ["CONTRADICTS"],
+      "expected_status": "CONTRADICTED",
+      "explanation": "Filled positions and covered breaks are direct evidence against a staffing shortage during this shift, though not a universal statement about staffing."
+    },
+    {
+      "id": "neutral-operational-observation",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "Does a room reinspection observation address checklist availability?",
+      "records": [{"id": "OPS-118", "timestamp": "2026-10-24T11:00:00Z", "department": "Housekeeping", "text": "Two rooms were reinspected after the morning handover and both were ready for guests.", "tags": ["rooms", "inspection"]}],
+      "fixture_output": [{"source_record_id": "OPS-118", "quote": "Two rooms were reinspected after the morning handover", "stance": "NEUTRAL", "rationale": "This is a room readiness observation."}],
+      "semantic_review": true,
+      "expected_stances": ["NEUTRAL"],
+      "expected_status": "INSUFFICIENT",
+      "explanation": "The room inspection result neither supports nor contradicts checklist availability."
+    },
+    {
+      "id": "paraphrased-training-support",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "TRAINING_GAP",
+      "question": "Does an inexperienced colleague's question support a training gap?",
+      "records": [{"id": "OPS-119", "timestamp": "2026-10-24T12:00:00Z", "department": "Housekeeping", "text": "The new receptionist did not know which handover fields required completion, so a supervisor explained them.", "tags": ["training", "handover"]}],
+      "fixture_output": [{"source_record_id": "OPS-119", "quote": "did not know which handover fields required completion", "stance": "SUPPORTS", "rationale": "The colleague lacked procedural knowledge."}],
+      "semantic_review": true,
+      "expected_stances": ["SUPPORTS"],
+      "expected_status": "PARTIAL",
+      "explanation": "The quoted statement directly reports uncertainty about required handover fields, consistent with a training gap. One source supports but does not establish a recurring cause."
+    },
+    {
+      "id": "paraphrased-conflicting-sources",
+      "provider_mode": "adversarial_fixture",
+      "hypothesis_id": "CHECKLIST_UNAVAILABLE",
+      "question": "How should two fresh paraphrased reports in opposite directions be assessed?",
+      "records": [
+        {"id": "OPS-120", "timestamp": "2026-10-24T13:00:00Z", "department": "Front Office", "text": "At shift change no one could locate the printed handover checklist, so arrivals were noted on paper.", "tags": ["checklist", "handover"]},
+        {"id": "OPS-121", "timestamp": "2026-10-24T14:00:00Z", "department": "Front Office", "text": "At closeout the printed handover checklist was on the front desk and ready for the next team.", "tags": ["checklist", "handover"]}
+      ],
+      "fixture_output": [
+        {"source_record_id": "OPS-120", "quote": "no one could locate the printed handover checklist", "stance": "SUPPORTS", "rationale": "The checklist could not be located."},
+        {"source_record_id": "OPS-121", "quote": "the printed handover checklist was on the front desk and ready for the next team", "stance": "CONTRADICTS", "rationale": "The checklist was present."}
+      ],
+      "semantic_review": true,
+      "expected_stances": ["SUPPORTS", "CONTRADICTS"],
+      "expected_status": "PARTIAL",
+      "explanation": "The fresh sources describe checklist absence and later presence. The evidence conflicts and should remain partial pending context; neither statement proves the other false."
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+# Environment files, credentials, and key material
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+**/secrets/
+**/.aws/
+**/.ssh/
+*.pem
+*.key
+*.p12
+*.pfx
+*.secret
+
+# Dependencies and virtual environments
+node_modules/
+.venv/
+venv/
+env/
+
+# Build and coverage output
+dist/
+build/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp*/
+.mypy_cache/
+.ruff_cache/
+.freebuff/
+
+# Logs and temporary/editor artifacts
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local databases and backups
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.db
+*.db-*
+*.bak
+*.backup
+*.dump
+
+# Files explicitly excluded from the requested publication (visible in screenshots)
+/AI_PROVIDER_BOUNDARY.md
+/EVALUATION_PROTOCOL_APPROVAL.md
+/PHASE_20A_*.md
+/POLICY_DEMO_WALKTHROUGH.md
+/POLICY_GRAPH_PERSISTENCE_CONTRACT.md
+/PROVIDER_INTEGRATION_OFFLINE_TEST_PLAN.md
+/PROVIDER_INTEGRATION_READINESS_CHECKLIST.md
+/SEMANTIC_PROVIDER_EXPERIMENT.md
