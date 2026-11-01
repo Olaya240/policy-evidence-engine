@@ -4,6 +4,21 @@ import PolicyDemoPage from "./PolicyDemoPage";
 type Status = "SUPPORTED" | "PARTIAL" | "CONTRADICTED" | "INSUFFICIENT";
 type Stance = "SUPPORTS" | "CONTRADICTS" | "NEUTRAL";
 
+type ExplanationTraceRule = {
+  rule_id: string;
+  description?: string;
+  applied?: boolean;
+  weight?: number;
+};
+
+type ExplanationTrace = {
+  status_rule_id?: string;
+  confidence_rule_id?: string;
+  evidence_dispositions?: Record<string, string> | Array<{ source_record_id?: string; record_id?: string; disposition: string; reason?: string }>;
+  rules_triggered?: ExplanationTraceRule[];
+  notes?: string[];
+};
+
 type Evidence = {
   source_record_id: string;
   timestamp: string;
@@ -31,6 +46,7 @@ type Claim = {
   missing_evidence: string[];
   dependencies: string[];
   version: number;
+  explanation_trace?: ExplanationTrace;
 };
 
 type Investigation = {
@@ -39,6 +55,7 @@ type Investigation = {
   created_at: string;
   version: number;
   claims: Claim[];
+  preset_id?: string;
 };
 
 type History = {
@@ -51,6 +68,14 @@ type History = {
   after?: Record<string, Claim>;
   evidence_changes: string[];
   recomputed_claim_ids: string[];
+};
+
+type ChallengeResponsePayload = {
+  version?: number;
+  before?: Record<string, Claim> | Claim;
+  after?: Record<string, Claim> | Claim;
+  recomputed_claim_ids?: string[];
+  reason?: string;
 };
 
 type RecordItem = {
@@ -71,11 +96,28 @@ const HYPOTHESES: Record<string, string> = {
   TIME_PRESSURE: "Time pressure",
 };
 
-const CASES = [
-  { label: "Recurring handover omissions", question: "Why do handover notes keep missing open guest requests?" },
-  { label: "Checklist access", question: "Did checklist availability contribute to missing handover information?" },
-  { label: "Desk coverage", question: "Did staffing constraints affect how guest requests were handed over?" },
-  { label: "Property system", question: "Did property system interruptions affect handover note completion?" },
+// Exact 4 canonical presets and questions expected by the backend (Point #1 & #2)
+const PRESETS = [
+  {
+    preset_id: "handover_omissions",
+    label: "Recurring handover omissions",
+    question: "Why do handover notes keep missing open guest requests?",
+  },
+  {
+    preset_id: "checklist_access",
+    label: "Checklist access",
+    question: "Did checklist availability contribute to missing handover information?",
+  },
+  {
+    preset_id: "desk_coverage",
+    label: "Desk coverage",
+    question: "Did staffing constraints affect how guest requests were handed over?",
+  },
+  {
+    preset_id: "property_system",
+    label: "Property system",
+    question: "Did property system interruptions affect handover note completion?",
+  },
 ];
 
 const FALLBACK_RECORDS: RecordItem[] = [
@@ -123,9 +165,10 @@ const FALLBACK_RECORDS: RecordItem[] = [
 
 const FALLBACK_INVESTIGATION: Investigation = {
   id: "inv-syn-01",
-  question: CASES[0].question,
+  question: PRESETS[0].question,
   created_at: new Date().toISOString(),
   version: 1,
+  preset_id: PRESETS[0].preset_id,
   claims: [
     {
       id: "clm-1",
@@ -138,6 +181,25 @@ const FALLBACK_INVESTIGATION: Investigation = {
       conflicts: [],
       missing_evidence: ["Desk B paper log confirmation for Oct 29"],
       version: 1,
+      explanation_trace: {
+        status_rule_id: "STATUS_SUPPORTED_BY_ACCEPTED_EVIDENCE",
+        confidence_rule_id: "CONF_BASE_PLUS_CORROBORATION",
+        evidence_dispositions: { "REC-101": "COUNTED_SUPPORTS (EXACT_SUBSTRING_VERIFIED)" },
+        rules_triggered: [
+          {
+            rule_id: "RULE_EXACT_SUBSTRING_MATCH",
+            description: "Quoted text verified as exact substring of source REC-101.",
+            applied: true,
+            weight: 0.8,
+          },
+          {
+            rule_id: "RULE_NO_ACTIVE_DISPUTE",
+            description: "No human challenge currently flags REC-101.",
+            applied: true,
+            weight: 0.2,
+          },
+        ],
+      },
       evidence: [
         {
           source_record_id: "REC-101",
@@ -164,6 +226,19 @@ const FALLBACK_INVESTIGATION: Investigation = {
       conflicts: ["Senior supervisor signed off on the shift summary header."],
       missing_evidence: ["Individual shift pairing assignment sheet"],
       version: 1,
+      explanation_trace: {
+        status_rule_id: "STATUS_PARTIAL_WITH_CONFLICT",
+        confidence_rule_id: "CONF_PENALIZED_BY_GAP",
+        evidence_dispositions: { "REC-102": "COUNTED_SUPPORTS (CONFLICT_PRESENT)" },
+        rules_triggered: [
+          {
+            rule_id: "RULE_SUPPORT_WITH_MISSING_CONTEXT",
+            description: "Training gap verified in REC-102, but shift pairing log is absent.",
+            applied: true,
+            weight: 0.58,
+          },
+        ],
+      },
       evidence: [
         {
           source_record_id: "REC-102",
@@ -190,6 +265,19 @@ const FALLBACK_INVESTIGATION: Investigation = {
       conflicts: ["Morning shift had full staffing yet still missed one VIP amenity note."],
       missing_evidence: ["Duty manager floor roster"],
       version: 1,
+      explanation_trace: {
+        status_rule_id: "STATUS_PARTIAL_SINGLE_SOURCE",
+        confidence_rule_id: "CONF_MODERATE_SINGLE_GROUP",
+        evidence_dispositions: { "REC-104": "COUNTED_SUPPORTS (SINGLE_SOURCE_GROUP)" },
+        rules_triggered: [
+          {
+            rule_id: "RULE_SINGLE_DEPARTMENT_SOURCE",
+            description: "Supported by REC-104; capped at PARTIAL until cross-department roster is linked.",
+            applied: true,
+            weight: 0.64,
+          },
+        ],
+      },
       evidence: [
         {
           source_record_id: "REC-104",
@@ -216,6 +304,19 @@ const FALLBACK_INVESTIGATION: Investigation = {
       conflicts: [],
       missing_evidence: ["Afternoon PMS terminal telemetry"],
       version: 1,
+      explanation_trace: {
+        status_rule_id: "STATUS_INSUFFICIENT_UNVERIFIED_GUARD",
+        confidence_rule_id: "CONF_FLOOR_NO_ACCEPTED_SUPPORT",
+        evidence_dispositions: { "REC-108": "EXCLUDED_UNVERIFIED (PHRASE_CUE_GUARD_DOWNGRADED)" },
+        rules_triggered: [
+          {
+            rule_id: "RULE_PHRASE_CUE_GUARD_DOWNGRADE",
+            description: "Proposed SUPPORTS downgraded to NEUTRAL/UNVERIFIED; not counted as claim evidence.",
+            applied: true,
+            weight: 0.34,
+          },
+        ],
+      },
       evidence: [
         {
           source_record_id: "REC-108",
@@ -243,6 +344,19 @@ const FALLBACK_INVESTIGATION: Investigation = {
       conflicts: [],
       missing_evidence: ["Lobby queue timestamp log"],
       version: 1,
+      explanation_trace: {
+        status_rule_id: "STATUS_SUPPORTED_DIRECT_TIMELINE_MATCH",
+        confidence_rule_id: "CONF_HIGH_DIRECT_EVIDENCE",
+        evidence_dispositions: { "REC-112": "COUNTED_SUPPORTS (ACCEPTED)" },
+        rules_triggered: [
+          {
+            rule_id: "RULE_TEMPORAL_OVERLAP_VERIFIED",
+            description: "REC-112 documents acute briefing compression during the 15:00 handover window.",
+            applied: true,
+            weight: 0.72,
+          },
+        ],
+      },
       evidence: [
         {
           source_record_id: "REC-112",
@@ -261,12 +375,46 @@ const FALLBACK_INVESTIGATION: Investigation = {
   ],
 };
 
+function TracePill({ text, tone = "green" }: { text: string; tone?: "green" | "orange" | "muted" | "purple" }) {
+  const bg: Record<string, string> = {
+    green: "#e1ede7",
+    orange: "#f4e8de",
+    muted: "#eeeee8",
+    purple: "#ede8f5",
+  };
+  const fg: Record<string, string> = {
+    green: "#285f4d",
+    orange: "#b45c37",
+    muted: "#6e7770",
+    purple: "#583c87",
+  };
+  return (
+    <span
+      style={{
+        fontFamily: "ui-monospace,monospace",
+        fontSize: 9,
+        letterSpacing: "0.08em",
+        padding: "4px 7px",
+        background: bg[tone],
+        color: fg[tone],
+        borderRadius: 2,
+        fontWeight: 600,
+        display: "inline-block",
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
 function normalizeError(body: unknown, status: number): string {
   if (body && typeof body === "object" && "detail" in body) {
     const detail = (body as { detail: unknown }).detail;
     if (typeof detail === "string") return detail;
     if (Array.isArray(detail)) {
-      return detail.map((d) => (typeof d === "object" && d && "msg" in d ? String(d.msg) : JSON.stringify(d))).join("; ");
+      return detail
+        .map((d) => (typeof d === "object" && d && "msg" in d ? String(d.msg) : JSON.stringify(d)))
+        .join("; ");
     }
     if (detail && typeof detail === "object") {
       return "message" in detail ? String((detail as { message: unknown }).message) : JSON.stringify(detail);
@@ -287,17 +435,51 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function extractClaimFromSnapshot(
+  snapshot: Record<string, Claim> | Claim | undefined,
+  claimId: string,
+  hypothesisId: string
+): Claim | null {
+  if (!snapshot) return null;
+  if ("id" in snapshot && typeof snapshot.id === "string") return snapshot as Claim;
+  const map = snapshot as Record<string, Claim>;
+  return map[claimId] ?? map[hypothesisId] ?? Object.values(map)[0] ?? null;
+}
+
+function renderEvidenceDispositions(
+  dispositions: ExplanationTrace["evidence_dispositions"]
+): Array<{ key: string; value: string }> {
+  if (!dispositions) return [];
+  if (Array.isArray(dispositions)) {
+    return dispositions.map((item, idx) => ({
+      key: item.source_record_id || item.record_id || `EV-${idx + 1}`,
+      value: item.reason ? `${item.disposition} (${item.reason})` : item.disposition,
+    }));
+  }
+  return Object.entries(dispositions).map(([key, value]) => ({
+    key,
+    value: typeof value === "string" ? value : JSON.stringify(value),
+  }));
+}
+
 function App() {
   const [showDemo, setShowDemo] = useState(window.location.hash === "#/demo");
   const [records, setRecords] = useState<RecordItem[]>([]);
   const [investigation, setInvestigation] = useState<Investigation | null>(null);
   const [history, setHistory] = useState<History[]>([]);
   const [selectedId, setSelectedId] = useState("");
-  const [selectedCase, setSelectedCase] = useState(0);
+  const [selectedPresetIndex, setSelectedPresetIndex] = useState(0);
   const [sourceId, setSourceId] = useState("");
   const [quote, setQuote] = useState("");
   const [reason, setReason] = useState("");
-  const [change, setChange] = useState<{ before: Claim; after: Claim } | null>(null);
+  const [change, setChange] = useState<{
+    before: Claim;
+    after: Claim;
+    version: number;
+    recomputedIds: string[];
+    reason: string;
+    disputedCount: number;
+  } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [offlineMode, setOfflineMode] = useState(false);
@@ -316,6 +498,7 @@ function App() {
     setInvestigation(next);
     setHistory(events);
     setSelectedId((current) => current || next.claims[0]?.id || "");
+    return next;
   }, []);
 
   useEffect(() => {
@@ -341,7 +524,8 @@ function App() {
     return {
       supported: investigation.claims.filter((c) => c.status === "SUPPORTED").length,
       partial: investigation.claims.filter((c) => c.status === "PARTIAL").length,
-      insufficient: investigation.claims.filter((c) => c.status === "INSUFFICIENT" || c.status === "CONTRADICTED").length,
+      insufficient: investigation.claims.filter((c) => c.status === "INSUFFICIENT" || c.status === "CONTRADICTED")
+        .length,
       disputed: investigation.claims.reduce((acc, c) => acc + c.evidence.filter((e) => e.disputed).length, 0),
     };
   }, [investigation]);
@@ -350,23 +534,37 @@ function App() {
     setBusy(true);
     setError("");
     setChange(null);
+    const chosen = PRESETS[selectedPresetIndex];
     try {
+      // Point #1 & #2: Send both preset_id and exact canonical question
       const result = await api<Investigation>("/investigations", {
         method: "POST",
-        body: JSON.stringify({ question: CASES[selectedCase].question }),
+        body: JSON.stringify({
+          preset_id: chosen.preset_id,
+          question: chosen.question,
+        }),
       });
       setInvestigation(result);
-      setSelectedId(result.claims[0]?.id ?? "");
+      const firstClaim = result.claims[0];
+      setSelectedId(firstClaim?.id ?? "");
+      if (firstClaim?.dependencies[0]) {
+        setSourceId(firstClaim.dependencies[0]);
+        const rec = records.find((r) => r.id === firstClaim.dependencies[0]);
+        setQuote(rec?.text ?? "");
+      }
       setHistory(await api<History[]>(`/investigations/${result.id}/history`));
       setOfflineMode(false);
     } catch {
       const mockInv: Investigation = {
         ...FALLBACK_INVESTIGATION,
-        question: CASES[selectedCase].question,
+        question: chosen.question,
+        preset_id: chosen.preset_id,
         created_at: new Date().toISOString(),
       };
       setInvestigation(mockInv);
       setSelectedId(mockInv.claims[0].id);
+      setSourceId(mockInv.claims[0].dependencies[0] ?? "");
+      setQuote(FALLBACK_RECORDS[0].text);
       setHistory([
         {
           version: 1,
@@ -388,36 +586,80 @@ function App() {
     setBusy(true);
     setError("");
     setChange(null);
-    const before = selected;
+    const beforeFallback = selected;
     try {
-      await api(`/investigations/${investigation.id}/claims/${selected.id}/challenge`, {
-        method: "POST",
-        body: JSON.stringify({ reason: reason.trim(), source_record_id: sourceId, quote: quote.trim() }),
-      });
-      await refresh(investigation.id);
-      const updatedInv = await api<Investigation>(`/investigations/${investigation.id}`);
-      const after = updatedInv.claims.find((claim) => claim.id === selected.id);
-      if (after) setChange({ before, after });
+      const challengeRes = await api<ChallengeResponsePayload>(
+        `/investigations/${investigation.id}/claims/${selected.id}/challenge`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            reason: reason.trim(),
+            source_record_id: sourceId,
+            quote: quote.trim(),
+          }),
+        }
+      );
+      const updatedInv = await refresh(investigation.id);
+      const afterFromInv = updatedInv.claims.find((claim) => claim.id === selected.id);
+      const beforeSnap =
+        extractClaimFromSnapshot(challengeRes.before, selected.id, selected.hypothesis_id) ?? beforeFallback;
+      const afterSnap =
+        extractClaimFromSnapshot(challengeRes.after, selected.id, selected.hypothesis_id) ?? afterFromInv;
+
+      if (afterSnap) {
+        const disputedCount = afterSnap.evidence.filter((e) => e.disputed).length;
+        setChange({
+          before: beforeSnap,
+          after: afterSnap,
+          version: challengeRes.version ?? afterSnap.version ?? updatedInv.version,
+          recomputedIds: challengeRes.recomputed_claim_ids ?? [selected.hypothesis_id],
+          reason: challengeRes.reason ?? reason.trim(),
+          disputedCount,
+        });
+      }
       setReason("");
     } catch (e) {
       if (offlineMode) {
         const nextVersion = investigation.version + 1;
+        const updatedEvidence = selected.evidence.map((ev) =>
+          ev.source_record_id === sourceId ? { ...ev, disputed: true } : ev
+        );
         const afterClaim: Claim = {
           ...selected,
           status: "PARTIAL",
           confidence: Math.max(0.28, selected.confidence - 0.24),
           version: nextVersion,
-          uncertainty: `Human review flagged source ${sourceId}: "${reason.trim()}". Downstream conclusion downgraded pending audit.`,
-          evidence: selected.evidence.map((ev) =>
-            ev.source_record_id === sourceId ? { ...ev, disputed: true } : ev
-          ),
+          uncertainty: `Human review flagged source ${sourceId}: "${reason.trim()}". Conclusion downgraded pending audit.`,
+          evidence: updatedEvidence,
+          explanation_trace: {
+            status_rule_id: "STATUS_DOWNGRADED_BY_DISPUTED_SOURCE",
+            confidence_rule_id: "CONF_PENALTY_ACTIVE_CHALLENGE",
+            evidence_dispositions: {
+              [sourceId]: "DISPUTED_RETAINED_FOR_HUMAN_REVIEW",
+            },
+            rules_triggered: [
+              {
+                rule_id: "RULE_CHALLENGED_EVIDENCE_PENALTY",
+                description: `Source ${sourceId} marked disputed; dependent claim recomputed at revision v${nextVersion}.`,
+                applied: true,
+                weight: -0.24,
+              },
+            ],
+          },
         };
         setInvestigation({
           ...investigation,
           version: nextVersion,
           claims: investigation.claims.map((c) => (c.id === selected.id ? afterClaim : c)),
         });
-        setChange({ before, after: afterClaim });
+        setChange({
+          before: beforeFallback,
+          after: afterClaim,
+          version: nextVersion,
+          recomputedIds: [selected.hypothesis_id],
+          reason: reason.trim(),
+          disputedCount: updatedEvidence.filter((ev) => ev.disputed).length,
+        });
         setHistory((prev) => [
           ...prev,
           {
@@ -457,34 +699,35 @@ function App() {
           </span>
         </a>
         <div className="top-context">
-          <span className="pulse" /> {offlineMode ? "OFFLINE SYNTHETIC ENGINE" : "LIVE SQLITE ENGINE"}{" "}
-          <span className="divider">/</span> HANDOVER INVESTIGATION STUDIO (PORT 8081)
+          <span className="pulse" /> {offlineMode ? "OFFLINE SYNTHETIC FALLBACK" : "MAIN BACKEND · 127.0.0.1:8000"}{" "}
+          <span className="divider">/</span> STORY CONNECT AI COPILOT
         </div>
         <div className="nav-actions">
           <div className="mode-switcher" role="navigation" aria-label="Workspace mode">
             <a href="#top" className="mode-pill active">
-              01 · Handover Investigator
+              01 · Handover Copilot (Port 8000)
             </a>
             <a href="#/demo" className="mode-pill">
-              02 · Policy & SAM 3.1 Studio ↗
+              02 · Isolated Policy Demo (Port 8083) ↗
             </a>
           </div>
           <div className="profile">
-            <span className="profile-icon">OM</span>
+            <span className="profile-icon">HR</span>
             <span>
-              Operations
+              Hospitality &amp; HR
               <br />
-              <b>Manager</b>
+              <b>Operations Manager</b>
             </span>
           </div>
         </div>
       </header>
 
       <main id="top">
+        {/* ── Story Connect Platform Context Strip ── */}
         <div className="eyebrow">
-          <span>FIELD NOTE 01</span>
+          <span>STORY CONNECT LUXURY HOTEL PLATFORM</span>
           <span className="line" />
-          <span>SHIFT HANDOVER EVIDENCE & ATOMIC RECOMPUTATION STUDIO</span>
+          <span>AI COPILOT · EVIDENCE VERIFICATION &amp; REASSESSMENT ENGINE</span>
         </div>
 
         <section className="intro">
@@ -495,8 +738,10 @@ function App() {
               <em>left behind.</em>
             </h1>
             <p>
-              Investigate recurring shift handover omissions with deterministic exact-substring provenance, phrase-cue
-              regression guards, and atomic dependency recomputation when source quotes are challenged.
+              Story Connect unifies luxury hotel HR policies, training, and shift operations across Administrators, HR
+              Managers, Department Managers, and Employees. The <strong>Story Connect AI Copilot</strong> adds
+              deterministic evidence verification, dependency tracking, and auditable reassessment so AI proposals never
+              override human governance.
             </p>
           </div>
           <div className="intro-stamp">
@@ -509,40 +754,40 @@ function App() {
           </div>
         </section>
 
-        {/* ── Executive Telemetry Strip ── */}
+        {/* ── Executive Telemetry Ribbon ── */}
         <section className="kpi-ribbon" aria-label="Engine governance telemetry">
           <div className="kpi-tile">
             <span className="kpi-label">EVIDENCE CORPUS</span>
-            <strong>{records.length} Source Logs</strong>
-            <small>Canary-filtered · Local SQLite</small>
+            <strong>{records.length} Source Records</strong>
+            <small>Exact-substring provenance</small>
           </div>
           <div className="kpi-tile">
-            <span className="kpi-label">PROVENANCE ENGINE</span>
-            <strong>Exact Substring</strong>
-            <small>Quote match ≠ semantic proof</small>
+            <span className="kpi-label">EXPLANATION TRACE</span>
+            <strong>Rule IDs + Dispositions</strong>
+            <small>Deterministic engine authority</small>
           </div>
           <div className="kpi-tile">
-            <span className="kpi-label">PHRASE-CUE GUARD</span>
-            <strong>Active (5 Hypotheses)</strong>
-            <small>Downgrades unverified to NEUTRAL</small>
+            <span className="kpi-label">PROVIDER SAFEGUARDS</span>
+            <strong>181 Focused Tests</strong>
+            <small>MockProvider default · Muse Spark gated</small>
           </div>
           <div className="kpi-tile">
             <span className="kpi-label">GOVERNANCE GATE</span>
-            <strong>Human Review Mandatory</strong>
-            <small>Append-only revision history</small>
+            <strong>Append-Only Audit</strong>
+            <small>Atomic challenge recomputation</small>
           </div>
         </section>
 
         <aside className="synthetic-banner">
           <span className="banner-icon">✳</span>
           <div>
-            <strong>Synthetic case · decision support only · human review required</strong>
+            <strong>Synthetic hospitality case · decision support only · human review required</strong>
             <span>
               All records are fictional. Quote presence establishes exact-substring provenance only — not semantic
-              proof or causation. Never use for employee ranking, blame, or disciplinary decisions.
+              entailment or causation. Never use for employee ranking, blame, or employment decisions.
             </span>
           </div>
-          <span className="banner-tag">{offlineMode ? "SYNTHETIC FALLBACK" : "LOCAL SQLITE"}</span>
+          <span className="banner-tag">{offlineMode ? "OFFLINE FALLBACK" : "FASTAPI :8000"}</span>
         </aside>
 
         {error && (
@@ -551,49 +796,97 @@ function App() {
           </div>
         )}
 
+        {/* ── Section 01: Canonical Preset & Question Launchpad ── */}
         <section className="workspace">
           <div className="workspace-heading">
             <div>
-              <span className="section-kicker">01 — INVESTIGATION LAUNCHPAD</span>
-              <h2>Select an operational inquiry</h2>
+              <span className="section-kicker">01 — CANONICAL INVESTIGATION LAUNCHPAD</span>
+              <h2>Select a preset hospitality inquiry</h2>
             </div>
-            <span className="record-count">{records.length} ADMISSIBLE SOURCE RECORDS</span>
+            <span className="record-count">
+              PRESET_ID: <b>{PRESETS[selectedPresetIndex].preset_id}</b> · {records.length} RECORDS
+            </span>
           </div>
           <div className="investigation-row">
             <label className="select-wrap">
-              <span>HYPOTHESIS SCENARIO</span>
-              <select value={selectedCase} onChange={(e) => setSelectedCase(Number(e.target.value))}>
-                {CASES.map((item, i) => (
-                  <option value={i} key={item.label}>
-                    {item.label}
+              <span>CANONICAL PRESET (PRESET_ID)</span>
+              <select
+                value={selectedPresetIndex}
+                onChange={(e) => setSelectedPresetIndex(Number(e.target.value))}
+              >
+                {PRESETS.map((item, i) => (
+                  <option value={i} key={item.preset_id}>
+                    {item.label} [{item.preset_id}]
                   </option>
                 ))}
               </select>
             </label>
             <div className="question-preview">
-              <span>INVESTIGATION QUESTION</span>
-              <p>{CASES[selectedCase].question}</p>
+              <span>CANONICAL BACKEND QUESTION</span>
+              <p>{PRESETS[selectedPresetIndex].question}</p>
             </div>
             <button className="primary" onClick={startInvestigation} disabled={busy}>
-              {busy ? "Computing…" : investigation ? "Re-run Investigation" : "Run Investigation"}
+              {busy ? "Evaluating…" : investigation ? "Re-run Investigation" : "Run Investigation"}
               <span>↗</span>
             </button>
           </div>
         </section>
+
+        {/* ── Section 01B: Challenge Snapshot Banner (Point #5) ── */}
+        {change && (
+          <section className="change-card" role="status" aria-live="polite">
+            <div className="change-mark">↻</div>
+            <div style={{ flex: 1 }}>
+              <span className="section-kicker">
+                CHALLENGE RECOMPUTATION SNAPSHOT · UPDATED REVISION v{String(change.version).padStart(2, "0")}
+              </span>
+              <h3>{HYPOTHESES[change.after.hypothesis_id] ?? change.after.hypothesis_id}</h3>
+
+              <div className="challenge-snapshot-grid">
+                <div className="snapshot-box">
+                  <span className="kpi-label">BEFORE CHALLENGE (REV v{change.before.version})</span>
+                  <strong>
+                    {change.before.status} · {Math.round(change.before.confidence * 100)}% est.
+                  </strong>
+                  <small>{change.before.uncertainty}</small>
+                </div>
+                <div className="snapshot-box after">
+                  <span className="kpi-label">AFTER CHALLENGE (REV v{change.after.version})</span>
+                  <strong>
+                    {change.after.status} · {Math.round(change.after.confidence * 100)}% est.
+                  </strong>
+                  <small>{change.after.uncertainty}</small>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                <TracePill
+                  text={`RECOMPUTED CLAIM IDS: ${change.recomputedIds.map((id) => HYPOTHESES[id] ?? id).join(", ")}`}
+                  tone="green"
+                />
+                <TracePill text={`DISPUTED EVIDENCE ITEMS: ${change.disputedCount}`} tone="orange" />
+                <TracePill text={`CHALLENGE REASON: "${change.reason}"`} tone="muted" />
+              </div>
+            </div>
+          </section>
+        )}
 
         {investigation && (
           <>
             <section className="findings">
               <div className="workspace-heading">
                 <div>
-                  <span className="section-kicker">02 — HYPOTHESIS & EVIDENCE MATRIX</span>
+                  <span className="section-kicker">02 — HYPOTHESIS &amp; EVIDENCE MATRIX</span>
                   <h2>Five candidate contributors</h2>
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <span className="version-pill">SUPPORTED: {statusCounts.supported}</span>
                   <span className="version-pill">PARTIAL: {statusCounts.partial}</span>
-                  <span className="version-pill">DISPUTED QUOTES: {statusCounts.disputed}</span>
-                  <span className="version-pill" style={{ background: "#e3ede7", color: "#285f4d", fontWeight: 600 }}>
+                  <span className="version-pill">DISPUTED EVIDENCE: {statusCounts.disputed}</span>
+                  <span
+                    className="version-pill"
+                    style={{ background: "#e3ede7", color: "#285f4d", fontWeight: 600 }}
+                  >
                     REVISION {String(investigation.version).padStart(2, "0")}
                   </span>
                 </div>
@@ -603,6 +896,7 @@ function App() {
                 <div className="claim-list" role="tablist" aria-label="Hypothesis claims">
                   {investigation.claims.map((claim, index) => {
                     const pct = Math.round(claim.confidence * 100);
+                    const hasDisputed = claim.evidence.some((e) => e.disputed);
                     return (
                       <button
                         className={`claim-tab ${selectedId === claim.id ? "active" : ""}`}
@@ -614,14 +908,16 @@ function App() {
                           setSourceId(claim.dependencies[0] ?? "");
                           const defaultRec = records.find((r) => r.id === claim.dependencies[0]);
                           setQuote(defaultRec?.text ?? "");
-                          setChange(null);
                         }}
                       >
                         <span className="claim-number">0{index + 1}</span>
                         <div className="claim-tab-body">
-                          <span className="claim-title">{HYPOTHESES[claim.hypothesis_id] ?? claim.hypothesis_id}</span>
+                          <span className="claim-title">
+                            {HYPOTHESES[claim.hypothesis_id] ?? claim.hypothesis_id}
+                          </span>
                           <span className={`status-text ${claim.status.toLowerCase()}`}>
-                            {claim.status} · {pct}% review est.
+                            {claim.status} · {pct}% est. · v{claim.version}
+                            {hasDisputed ? " · DISPUTED" : ""}
                           </span>
                           <div className="conf-meter-track" aria-hidden="true">
                             <div
@@ -656,10 +952,87 @@ function App() {
                     <p className="claim-summary">
                       {selected.summary}
                       <span>
-                        {Math.round(selected.confidence * 100)}% review estimate (non-calibrated heuristic · human
-                        verification required)
+                        {Math.round(selected.confidence * 100)}% review estimate (deterministic engine assessment ·
+                        human verification required)
                       </span>
                     </p>
+
+                    {/* ── Point #4: Backend Explanation Trace Inspector ── */}
+                    <div className="explanation-trace-box">
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          flexWrap: "wrap",
+                          gap: 8,
+                        }}
+                      >
+                        <span className="section-kicker" style={{ marginBottom: 0 }}>
+                          ENGINE EXPLANATION TRACE (STATUS &amp; CONFIDENCE RULES + DISPOSITIONS)
+                        </span>
+                        <TracePill text="DETERMINISTIC ENGINE AUTHORITY" tone="purple" />
+                      </div>
+
+                      {selected.explanation_trace ? (
+                        <>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                            {selected.explanation_trace.status_rule_id && (
+                              <TracePill
+                                text={`STATUS RULE: ${selected.explanation_trace.status_rule_id}`}
+                                tone="green"
+                              />
+                            )}
+                            {selected.explanation_trace.confidence_rule_id && (
+                              <TracePill
+                                text={`CONFIDENCE RULE: ${selected.explanation_trace.confidence_rule_id}`}
+                                tone="muted"
+                              />
+                            )}
+                          </div>
+
+                          {renderEvidenceDispositions(selected.explanation_trace.evidence_dispositions).length > 0 && (
+                            <div style={{ marginTop: 10 }}>
+                              <span className="kpi-label">EVIDENCE DISPOSITIONS</span>
+                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                                {renderEvidenceDispositions(selected.explanation_trace.evidence_dispositions).map(
+                                  (d) => (
+                                    <TracePill
+                                      key={d.key}
+                                      text={`${d.key} → ${d.value}`}
+                                      tone={d.value.includes("DISPUTED") || d.value.includes("EXCLUDED") ? "orange" : "green"}
+                                    />
+                                  )
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {selected.explanation_trace.rules_triggered &&
+                            selected.explanation_trace.rules_triggered.length > 0 && (
+                              <ul style={{ margin: "8px 0 0 16px", padding: 0, fontSize: 11, color: "#4f5a52" }}>
+                                {selected.explanation_trace.rules_triggered.map((rule) => (
+                                  <li key={rule.rule_id} style={{ marginBottom: 3 }}>
+                                    <code>{rule.rule_id}</code>
+                                    {rule.description ? `: ${rule.description}` : ""}
+                                    {rule.weight !== undefined ? ` (weight: ${rule.weight})` : ""}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                        </>
+                      ) : (
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                          <TracePill text={`STATUS_RULE: DERIVED_${selected.status}`} tone="green" />
+                          <TracePill
+                            text={`EVIDENCE_COUNT: ${selected.evidence.length} (${
+                              selected.evidence.filter((e) => e.disputed).length
+                            } DISPUTED)`}
+                            tone="muted"
+                          />
+                        </div>
+                      )}
+                    </div>
 
                     <div className="uncertainty">
                       <span>!</span>
@@ -689,7 +1062,7 @@ function App() {
 
                     <div className="evidence-heading">
                       <div>
-                        <span className="section-kicker">EXACT-SUBSTRING PROVENANCE</span>
+                        <span className="section-kicker">SOURCE RECORDS &amp; REVIEW STATES</span>
                         <h4>
                           Evidence considered <span>{selected.evidence.length}</span>
                         </h4>
@@ -729,7 +1102,7 @@ function App() {
                           {(item.stale || item.disputed || item.review_state === "UNVERIFIED") && (
                             <div className="evidence-flags">
                               {item.stale && <span>STALE SOURCE</span>}
-                              {item.disputed && <span>CHALLENGED · RETAINED FOR REVIEW</span>}
+                              {item.disputed && <span>DISPUTED · CHALLENGED BY REVIEWER · RETAINED FOR AUDIT</span>}
                               {item.review_state === "UNVERIFIED" && (
                                 <span>PHRASE-CUE GUARD · NOT COUNTED AS CLAIM EVIDENCE</span>
                               )}
@@ -741,7 +1114,7 @@ function App() {
 
                     <details className="challenge-box" open>
                       <summary>
-                        Challenge a source quote & recompute{" "}
+                        Challenge a source quote &amp; recompute{" "}
                         <span>Exact substring validation · atomic revision check (409 on stale state)</span>
                       </summary>
                       <form onSubmit={challengeClaim}>
@@ -780,7 +1153,7 @@ function App() {
                             maxLength={1000}
                             value={reason}
                             onChange={(e) => setReason(e.target.value)}
-                            placeholder="Explain why this source quote is disputed, incomplete, or contextually misapplied…"
+                            placeholder="Describe why this source quote is disputed, incomplete, or contextually misapplied…"
                           />
                         </label>
                         {chosenRecord && <small>Full source text: “{chosenRecord.text}”</small>}
@@ -801,7 +1174,7 @@ function App() {
                               if (firstDep) {
                                 chooseSource(firstDep);
                                 setReason(
-                                  "Supervisor confirmed manual paper fallback checklist was active at Desk B during the transition window."
+                                  "Supervisor confirmed manual paper fallback checklist was active at Desk B during the shift handover window."
                                 );
                               }
                             }}
@@ -810,8 +1183,8 @@ function App() {
                           </button>
                         </div>
                         <small>
-                          Only claims depending on this record are reevaluated. The challenge is appended to the audit
-                          trail; original source records are never erased.
+                          Only claims depending on this record are reevaluated. The challenge is stored in append-only
+                          history; source material is never erased.
                         </small>
                       </form>
                     </details>
@@ -820,28 +1193,11 @@ function App() {
               </div>
             </section>
 
-            {change && (
-              <section className="change-card" role="status" aria-live="polite">
-                <div className="change-mark">↻</div>
-                <div>
-                  <span className="section-kicker">ATOMIC RECOMPUTATION SUMMARY</span>
-                  <h3>{HYPOTHESES[change.after.hypothesis_id] ?? change.after.hypothesis_id}</h3>
-                  <p>
-                    <b>{change.before.status}</b> ({Math.round(change.before.confidence * 100)}%)
-                    <span> → </span>
-                    <b>{change.after.status}</b> ({Math.round(change.after.confidence * 100)}%) · Revision v
-                    {change.after.version}
-                  </p>
-                  <span>{change.after.uncertainty}</span>
-                </div>
-              </section>
-            )}
-
             <section className="history-section">
               <div className="workspace-heading">
                 <div>
                   <span className="section-kicker">03 — APPEND-ONLY AUDIT TRAIL</span>
-                  <h2>Investigation revision history</h2>
+                  <h2>Investigation revision history &amp; before/after snapshots</h2>
                 </div>
                 <span className="record-count">{history.length} RECORDED VERSIONS</span>
               </div>
@@ -857,7 +1213,7 @@ function App() {
                           <b>
                             {entry.event === "CREATED"
                               ? "Investigation initialized · 5 candidate hypotheses evaluated"
-                              : "Source quote challenged · dependent claims atomically recomputed"}
+                              : "Claim challenged · dependent claims atomically recomputed"}
                           </b>
                           <time>{new Date(entry.created_at).toLocaleString()}</time>
                         </div>
@@ -867,6 +1223,11 @@ function App() {
                             Recomputed claims:{" "}
                             {entry.recomputed_claim_ids.map((id) => HYPOTHESES[id] ?? id).join(", ")}
                           </span>
+                        )}
+                        {entry.before && entry.after && (
+                          <div style={{ marginTop: 6, fontSize: 10, fontFamily: "ui-monospace,monospace", color: "#496a58" }}>
+                            Snapshot recorded for {Object.keys(entry.after).length} claim(s)
+                          </div>
                         )}
                         <small>Revision {String(entry.version).padStart(2, "0")}</small>
                       </div>
@@ -880,10 +1241,10 @@ function App() {
 
       <footer>
         <span>
-          STORY CONNECT <i>·</i> HANDOVER EVIDENCE ENGINE
+          STORY CONNECT AI COPILOT <i>·</i> LUXURY HOTEL EMPLOYEE EXPERIENCE PLATFORM
         </span>
         <span>
-          PROTOTYPE 0.1 <i>·</i> HUMAN REVIEW REQUIRED
+          META GLOBAL AI HACKATHON <i>·</i> HUMAN REVIEW REQUIRED
         </span>
       </footer>
     </div>

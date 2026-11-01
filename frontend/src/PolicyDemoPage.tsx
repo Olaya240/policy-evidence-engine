@@ -738,6 +738,25 @@ export default function PolicyDemoPage() {
           <span className="banner-tag">{offlineDemoMode ? "OFFLINE FIXTURE" : "PORT 8083 READY"}</span>
         </aside>
 
+        <aside
+          style={{
+            marginTop: 12,
+            padding: "12px 16px",
+            background: offlineDemoMode ? "#f3ecdf" : "#e8eee6",
+            border: `1px solid ${offlineDemoMode ? "#e8d4b8" : "#d5e0d4"}`,
+            borderRadius: 3,
+            fontSize: 11,
+            color: offlineDemoMode ? "#8a5c20" : "#315b47",
+            lineHeight: 1.55,
+          }}
+        >
+          <b>Service Boundary Notice (Studio 02 Isolation):</b> This Policy &amp; SAM 3.1 Studio is strictly decoupled
+          from the main Handover Backend (<code>127.0.0.1:8000</code>).{" "}
+          {offlineDemoMode
+            ? "Currently running in explicit Offline Synthetic Fixture Mode because policy_demo_api.py (port 8083) is not running—no mock results are attributed to the main backend."
+            : "Connected to the isolated policy_demo_api.py service on 127.0.0.1:8083."}
+        </aside>
+
         {/* ── Scenario Selector Pills + Dropdown ───────────────────────────── */}
         <div style={{ ...card, marginTop: 24, padding: "18px 22px" }}>
           <div

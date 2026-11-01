@@ -1072,3 +1072,12 @@ footer i {
 @media (max-width: 768px) {
   .kpi-ribbon { grid-template-columns: 1fr 1fr; }
 }
+
+/* ── Side-by-Side Challenge Before/After Snapshot Cards ── */
+.explanation-trace-box { background: #f4f3ee; border: 1px solid #d5dad1; border-left: 3px solid #285f4d; padding: 12px 14px; margin: 14px 0; border-radius: 2px; }
+.challenge-snapshot-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+.snapshot-box { background: #fbfaf6; border: 1px solid #d5ded4; padding: 10px 12px; border-radius: 2px; display: grid; gap: 4px; }
+.snapshot-box.after { background: #f3ecdf; border-color: #e8d4b8; }
+.snapshot-box strong { font: 600 13px Georgia, serif; color: var(--ink); }
+.snapshot-box small { font-size: 10px; color: #57645b; line-height: 1.45; }
+@media (max-width: 768px) { .challenge-snapshot-grid { grid-template-columns: 1fr; } }
