@@ -136,6 +136,26 @@ class Record(BaseModel):
     source_group: Optional[str] = None
 
 
+class DocumentIngestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=255)
+    text: str = Field(min_length=1)
+    department: str = Field(default="Front Office", min_length=1, max_length=100)
+
+
+class DocumentIngestResponse(BaseModel):
+    document_id: str
+    sha256: str
+    filename: str
+    department: str
+    ingested_at: datetime
+    byte_size: int
+    chunk_count: int
+    records: list[Record]
+    duplicate: bool = False
+
+
 class Investigation(BaseModel):
     id: str
     question: str

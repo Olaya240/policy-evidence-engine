@@ -103,6 +103,11 @@ def initialize_database() -> Path:
                 text TEXT NOT NULL, tags_json TEXT NOT NULL, restricted INTEGER NOT NULL DEFAULT 0,
                 source_group TEXT
             );
+            CREATE TABLE IF NOT EXISTS documents (
+                id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, filename TEXT NOT NULL,
+                ingested_at TEXT NOT NULL, department TEXT NOT NULL, chunk_count INTEGER NOT NULL,
+                byte_size INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS investigations (
                 id TEXT PRIMARY KEY, question TEXT NOT NULL, created_at TEXT NOT NULL,
                 version INTEGER NOT NULL
@@ -143,6 +148,99 @@ def get_record(record_id: str) -> Record | None:
     if row is None:
         return None
     return Record(id=row["id"], timestamp=row["timestamp"], department=row["department"], text=row["text"], tags=json.loads(row["tags_json"]), restricted=False, source_group=row["source_group"])
+
+
+def _ensure_documents_table(db: sqlite3.Connection) -> None:
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, filename TEXT NOT NULL,
+            ingested_at TEXT NOT NULL, department TEXT NOT NULL, chunk_count INTEGER NOT NULL,
+            byte_size INTEGER NOT NULL
+        )
+    """)
+
+
+def ingest_document(
+    document_id: str,
+    sha256: str,
+    filename: str,
+    department: str,
+    byte_size: int,
+    records: list[Record],
+) -> tuple[dict, list[Record], bool]:
+    """Atomically insert document metadata and all chunk records.
+
+    Handles duplicate SHA-256 documents idempotently by returning existing data.
+    """
+    with connect(write=True) as db:
+        _ensure_documents_table(db)
+        existing = db.execute("SELECT * FROM documents WHERE sha256=?", (sha256,)).fetchone()
+        if existing is not None:
+            doc_dict = {
+                "id": existing["id"],
+                "sha256": existing["sha256"],
+                "filename": existing["filename"],
+                "ingested_at": existing["ingested_at"],
+                "department": existing["department"],
+                "chunk_count": existing["chunk_count"],
+                "byte_size": existing["byte_size"],
+            }
+            rows = db.execute(
+                "SELECT * FROM records WHERE source_group=? ORDER BY id",
+                (existing["id"],),
+            ).fetchall()
+            existing_records = [
+                Record(
+                    id=r["id"],
+                    timestamp=r["timestamp"],
+                    department=r["department"],
+                    text=r["text"],
+                    tags=json.loads(r["tags_json"]),
+                    restricted=bool(r["restricted"]),
+                    source_group=r["source_group"],
+                )
+                for r in rows
+            ]
+            return doc_dict, existing_records, True
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        db.execute(
+            "INSERT INTO documents(id, sha256, filename, ingested_at, department, chunk_count, byte_size) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (document_id, sha256, filename, now_iso, department, len(records), byte_size),
+        )
+        for r in records:
+            db.execute(
+                "INSERT INTO records(id, timestamp, department, text, tags_json, restricted, source_group) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (r.id, r.timestamp.isoformat(), r.department, r.text, json.dumps(r.tags), int(r.restricted), r.source_group or r.id),
+            )
+        doc_dict = {
+            "id": document_id,
+            "sha256": sha256,
+            "filename": filename,
+            "ingested_at": now_iso,
+            "department": department,
+            "chunk_count": len(records),
+            "byte_size": byte_size,
+        }
+        return doc_dict, records, False
+
+
+def get_document(document_id: str) -> dict | None:
+    with connect() as db:
+        _ensure_documents_table(db)
+        row = db.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def list_documents() -> list[dict]:
+    with connect() as db:
+        _ensure_documents_table(db)
+        rows = db.execute("SELECT * FROM documents ORDER BY ingested_at DESC, id").fetchall()
+    return [dict(r) for r in rows]
 
 
 def create_investigation(question: str, claims: list[dict]) -> dict:

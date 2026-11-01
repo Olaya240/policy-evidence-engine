@@ -1,13 +1,20 @@
 """FastAPI local API. Does not initialize the database or make network calls."""
+import json
 from copy import deepcopy
+from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .access import visible_records
 from .engine import AssessmentEngine, AssessmentError, ProviderError
-from .models import (ChallengeCreate, HistoryEntry, Investigation,
+from .ingest import (IngestError, MAX_CHUNK_CHARS, MAX_CHUNKS, MAX_FILE_BYTES,
+                     chunk_text, compute_document_identity,
+                     create_records_from_chunks, read_bounded_stream,
+                     validate_raw_document)
+from .models import (ChallengeCreate, DocumentIngestRequest,
+                     DocumentIngestResponse, HistoryEntry, Investigation,
                      InvestigationCreate, InvestigationPreset,
                      INVESTIGATION_PRESET_HYPOTHESES,
                      INVESTIGATION_PRESET_QUESTIONS, Record)
@@ -102,6 +109,107 @@ def health() -> dict:
 def records() -> list[Record]:
     require_database()
     return visible_records(store.list_records())
+
+
+@app.post("/api/records/ingest", response_model=DocumentIngestResponse, status_code=status.HTTP_201_CREATED)
+async def ingest_record(request: Request, response: Response) -> DocumentIngestResponse:
+    require_database()
+
+    content_type = request.headers.get("content-type", "").lower()
+    is_json = content_type.startswith("application/json")
+    is_text = content_type.startswith("text/plain") or not content_type
+
+    if not is_json and not is_text:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Unsupported media type. Only UTF-8 plain-text (text/plain or application/json) is accepted.",
+        )
+
+    # 1. Early Content-Length check to reject oversized payloads upfront before reading body
+    content_length_header = request.headers.get("content-length")
+    if content_length_header and content_length_header.isdigit():
+        if int(content_length_header) > MAX_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload size exceeds maximum permitted limit of {MAX_FILE_BYTES} bytes (1 MB)",
+            )
+
+    # 2. Bounded streaming read: abort immediately during streaming if cumulative bytes exceed 1 MB
+    try:
+        raw_body = await read_bounded_stream(request.stream(), MAX_FILE_BYTES)
+    except IngestError as exc:
+        if exc.code == "oversized_file":
+            raise HTTPException(status_code=413, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if is_json:
+        try:
+            body_json = json.loads(raw_body.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=422, detail="Document contains invalid or malformed UTF-8 bytes")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+        if not isinstance(body_json, dict):
+            raise HTTPException(status_code=422, detail="Request body must be a JSON object")
+
+        try:
+            req_model = DocumentIngestRequest.model_validate(body_json)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid request payload: {exc}")
+
+        filename = req_model.filename
+        department = req_model.department.strip() or "Front Office"
+        raw_bytes = req_model.text.encode("utf-8")
+    else:
+        raw_bytes = raw_body
+        filename = (
+            request.query_params.get("filename")
+            or request.headers.get("x-filename")
+            or "document.txt"
+        )
+        department = (
+            request.query_params.get("department")
+            or request.headers.get("x-department")
+            or "Front Office"
+        )
+        department = department.strip()[:100] or "Front Office"
+
+    try:
+        text, clean_filename = validate_raw_document(raw_bytes, filename)
+    except IngestError as exc:
+        if exc.code == "oversized_file":
+            raise HTTPException(status_code=413, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    doc_id, sha256 = compute_document_identity(raw_bytes)
+    try:
+        chunks = chunk_text(text, max_chunk_chars=MAX_CHUNK_CHARS, max_chunks=MAX_CHUNKS)
+    except IngestError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    now_dt = datetime.now(timezone.utc)
+    chunk_records = create_records_from_chunks(doc_id, chunks, department, now_dt)
+
+    doc_dict, stored_records, duplicate = store.ingest_document(
+        doc_id, sha256, clean_filename, department, len(raw_bytes), chunk_records
+    )
+
+    if duplicate:
+        response.status_code = status.HTTP_200_OK
+    else:
+        response.status_code = status.HTTP_201_CREATED
+
+    return DocumentIngestResponse(
+        document_id=doc_dict["id"],
+        sha256=doc_dict["sha256"],
+        filename=doc_dict["filename"],
+        department=doc_dict["department"],
+        ingested_at=doc_dict["ingested_at"],
+        byte_size=doc_dict["byte_size"],
+        chunk_count=doc_dict["chunk_count"],
+        records=stored_records,
+        duplicate=duplicate,
+    )
 
 
 @app.post("/api/investigations", response_model=Investigation, status_code=201)
