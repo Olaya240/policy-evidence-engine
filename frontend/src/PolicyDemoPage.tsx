@@ -111,6 +111,35 @@ const SCENARIO_DEPARTMENTS: Record<string, string[]> = {
   lounge_access: ["VALET", "SECURITY", "BANQUETS"],
 };
 
+const DEFAULT_SCENARIO_LIST: ScenarioMeta[] = [
+  {
+    id: "scheduling",
+    title: "Scheduling Notice — Compatible Change",
+    category: "Operations & Scheduling",
+    relation_type: "COMPATIBLE_CHANGE",
+    description: "Shift-change notification timeline updated from 48h to 24h across property operations.",
+    default_challenge_department: "HOUSEKEEPING",
+  },
+  {
+    id: "uniform_grooming",
+    title: "Uniform & Grooming — Contradiction",
+    category: "Guest Relations & Standards",
+    relation_type: "CONTRADICTION",
+    description:
+      "Incompatible mandatory emblem placement rules (left lapel vs. right lapel) for Guest Relations Ambassadors.",
+    default_challenge_department: "CONCIERGE",
+  },
+  {
+    id: "lounge_access",
+    title: "Executive Lounge Access — Scope / Time Difference",
+    category: "Loyalty & Access",
+    relation_type: "SCOPE_OR_TIME_DIFFERENCE",
+    description:
+      "Disjoint lounge access standards across distinct property collections and non-overlapping effective dates.",
+    default_challenge_department: "VALET",
+  },
+];
+
 const SAM_VISUAL_EVIDENCE: Record<
   string,
   {
@@ -167,7 +196,7 @@ const SAM_VISUAL_EVIDENCE: Record<
   },
 };
 
-const OFFLINE_SCENARIO_FIXTURES: Record<string, ScenarioResult> = {
+const EXPLICIT_DEMO_SCENARIOS: Record<string, ScenarioResult> = {
   scheduling: {
     comparison_id: "cmp-scheduling-001",
     request_id: "req-demo-sched-01",
@@ -301,14 +330,23 @@ function normalizeDemoError(body: unknown, status: number): string {
       return "message" in detail ? String((detail as { message: unknown }).message) : JSON.stringify(detail);
     }
   }
-  return `Request failed (${status})`;
+  return `Policy Demo API request failed (HTTP ${status})`;
 }
 
 async function demoApi<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/demo-api${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/demo-api${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json", ...init?.headers },
+    });
+  } catch (err) {
+    throw new Error(
+      `Cannot reach Policy Demo API at 127.0.0.1:8083 (/demo-api${path}). Start policy_demo_api.py on port 8083 or explicitly enable Demo Fixture Mode. (${
+        (err as Error).message
+      })`
+    );
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(normalizeDemoError(body, res.status));
@@ -393,7 +431,7 @@ function SectionHeading({ num, title }: { num: string; title: string }) {
 }
 
 export default function PolicyDemoPage() {
-  const [scenarios, setScenarios] = useState<ScenarioMeta[]>([]);
+  const [scenarios, setScenarios] = useState<ScenarioMeta[]>(DEFAULT_SCENARIO_LIST);
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>("scheduling");
   const [scenario, setScenario] = useState<ScenarioResult | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -407,47 +445,22 @@ export default function PolicyDemoPage() {
   const [error, setError] = useState("");
   const [challengeError, setChallengeError] = useState("");
   const [showSamMask, setShowSamMask] = useState(true);
-  const [offlineDemoMode, setOfflineDemoMode] = useState(false);
+  // P0.2: Never fall back silently — require explicit user selection for offline demo fixtures
+  const [explicitOfflineDemo, setExplicitOfflineDemo] = useState(false);
 
   const currentScenarioMeta = scenarios.find((s) => s.id === selectedScenarioId);
   const visualEvidence = SAM_VISUAL_EVIDENCE[selectedScenarioId] || SAM_VISUAL_EVIDENCE.scheduling;
 
   useEffect(() => {
+    if (explicitOfflineDemo) return;
     demoApi<ScenarioMeta[]>("/scenarios")
       .then((data) => {
         setScenarios(data);
       })
       .catch(() => {
-        setScenarios([
-          {
-            id: "scheduling",
-            title: "Scheduling Notice — Compatible Change",
-            category: "Operations & Scheduling",
-            relation_type: "COMPATIBLE_CHANGE",
-            description: "Shift-change notification timeline updated from 48h to 24h across property operations.",
-            default_challenge_department: "HOUSEKEEPING",
-          },
-          {
-            id: "uniform_grooming",
-            title: "Uniform & Grooming — Contradiction",
-            category: "Guest Relations & Standards",
-            relation_type: "CONTRADICTION",
-            description:
-              "Incompatible mandatory emblem placement rules (left lapel vs. right lapel) for Guest Relations Ambassadors.",
-            default_challenge_department: "CONCIERGE",
-          },
-          {
-            id: "lounge_access",
-            title: "Executive Lounge Access — Scope / Time Difference",
-            category: "Loyalty & Access",
-            relation_type: "SCOPE_OR_TIME_DIFFERENCE",
-            description:
-              "Disjoint lounge access standards across distinct property collections and non-overlapping effective dates.",
-            default_challenge_department: "VALET",
-          },
-        ]);
+        // Keep selector metadata available; actual scenario load will surface the error
       });
-  }, []);
+  }, [explicitOfflineDemo]);
 
   useEffect(() => {
     let cancelled = false;
@@ -459,6 +472,15 @@ export default function PolicyDemoPage() {
 
     const depts = SCENARIO_DEPARTMENTS[selectedScenarioId] || ["HOUSEKEEPING"];
     setSelectedDept(depts[0]);
+
+    if (explicitOfflineDemo) {
+      const fixture = EXPLICIT_DEMO_SCENARIOS[selectedScenarioId] || EXPLICIT_DEMO_SCENARIOS.scheduling;
+      setScenario(fixture);
+      setSessionId("explicit-demo-session-8083");
+      setSessionCreatedAtIso(new Date().toISOString());
+      setLoading(false);
+      return;
+    }
 
     Promise.all([
       demoApi<ScenarioResult>(`/scenario?id=${selectedScenarioId}`),
@@ -472,16 +494,14 @@ export default function PolicyDemoPage() {
         setScenario(scenarioData);
         setSessionId(sessionData.session_id);
         setSessionCreatedAtIso(sessionData.created_at_iso ?? sessionData.created_at ?? new Date().toISOString());
-        setOfflineDemoMode(false);
         setError("");
       })
-      .catch(() => {
+      .catch((e: Error) => {
         if (cancelled) return;
-        const fallback = OFFLINE_SCENARIO_FIXTURES[selectedScenarioId] || OFFLINE_SCENARIO_FIXTURES.scheduling;
-        setScenario(fallback);
-        setSessionId("0123456789abcdef0123456789abcdef");
-        setSessionCreatedAtIso(new Date().toISOString());
-        setOfflineDemoMode(true);
+        // P0.2: No silent fallback! Clear scenario and display visible error message
+        setScenario(null);
+        setSessionId(null);
+        setError(e.message);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -490,12 +510,85 @@ export default function PolicyDemoPage() {
     return () => {
       cancelled = true;
     };
-  }, [selectedScenarioId]);
+  }, [selectedScenarioId, explicitOfflineDemo]);
 
   const runChallenge = useCallback(async () => {
     if (!scenario) return;
     setChallenging(true);
     setChallengeError("");
+
+    if (explicitOfflineDemo) {
+      const nextSeq = historyEvents.length + 1;
+      const syntheticChallenge: ChallengeResult = {
+        challenge: {
+          challenge_id: `chg-${selectedScenarioId}-${nextSeq}`,
+          target_department: selectedDept,
+          target_side: "OLDER_AND_NEWER",
+          target_passage_id: scenario.provenance_details[0]?.passage_id ?? "p000001",
+          description: `Reviewer challenged whether ${selectedDept} is grounded in policy scope metadata.`,
+        },
+        applicability_audit: {
+          department_id: selectedDept,
+          applicability_status: "UNGROUNDED",
+          finding: `Scope metadata does not establish verified applicability for ${selectedDept}.`,
+          older_scope_state: "EXCERPT_ONLY",
+          newer_scope_state: "UNVERIFIED_SCOPE",
+        },
+        contract_enforcement: {
+          one_sided_change_rejected: true,
+          explanation:
+            "Unverified candidate proposals cannot mutate official policy or override missing department scope grounding.",
+        },
+        recomputed_proposal: {
+          candidate_id: scenario.candidate_id,
+          proposed_relation: "INCONCLUSIVE",
+          status: "PROPOSAL_ONLY",
+          semantic_support: "NOT_VERIFIED",
+          human_review_required: true,
+          abstain: true,
+          citations_count: scenario.provenance_details.length,
+          uncertainty_reasons: [
+            `DEPARTMENT_${selectedDept}_UNGROUNDED`,
+            "APPLICABILITY_AUDIT_FAILED",
+            "HUMAN_REVIEW_REQUIRED",
+          ],
+        },
+        recomputed_core_result: {
+          classification: "INCONCLUSIVE",
+          proposed_classification: scenario.proposed_relation,
+          human_review_required: true,
+          official_policy_mutated: false,
+          uncertainty_reasons: [
+            `DEPARTMENT_${selectedDept}_UNGROUNDED`,
+            "QUOTE_PROVENANCE_ONLY",
+            "SEMANTIC_SUPPORT_NOT_VERIFIED",
+          ],
+          impact_status: "INCONCLUSIVE",
+        },
+        differentiator_takeaway: `Challenging ${selectedDept} applicability exposes ungrounded scope assumptions: the engine abstains and recomputes the proposal from ${scenario.proposed_relation} to INCONCLUSIVE while preserving immutable audit history.`,
+      };
+      setChallenge(syntheticChallenge);
+      setHistoryEvents((prev) => [
+        ...prev,
+        {
+          sequence_number: nextSeq,
+          timestamp_iso: new Date().toISOString(),
+          scenario_id: selectedScenarioId,
+          target_department: selectedDept,
+          target_side: "OLDER_AND_NEWER",
+          applicability_status: "UNGROUNDED",
+          initial_relation: scenario.proposed_relation,
+          recomputed_relation: "INCONCLUSIVE",
+          core_classification: "INCONCLUSIVE",
+          uncertainty_reasons: syntheticChallenge.recomputed_core_result.uncertainty_reasons,
+          contract_enforced: true,
+          summary: `Department ${selectedDept} applicability challenged; proposal recomputed from ${scenario.proposed_relation} to INCONCLUSIVE.`,
+        },
+      ]);
+      setChallenging(false);
+      return;
+    }
+
     try {
       const result = await demoApi<
         ChallengeResult & { session_id?: string; sequence_number?: number; history_count?: number }
@@ -514,88 +607,19 @@ export default function PolicyDemoPage() {
         setHistoryEvents(historyData.events);
       }
     } catch (e: unknown) {
-      if (offlineDemoMode) {
-        const nextSeq = historyEvents.length + 1;
-        const syntheticChallenge: ChallengeResult = {
-          challenge: {
-            challenge_id: `chg-${selectedScenarioId}-${nextSeq}`,
-            target_department: selectedDept,
-            target_side: "OLDER_AND_NEWER",
-            target_passage_id: scenario.provenance_details[0]?.passage_id ?? "p000001",
-            description: `Reviewer challenged whether ${selectedDept} is grounded in policy scope metadata.`,
-          },
-          applicability_audit: {
-            department_id: selectedDept,
-            applicability_status: "UNGROUNDED",
-            finding: `Scope metadata does not establish verified applicability for ${selectedDept}.`,
-            older_scope_state: "EXCERPT_ONLY",
-            newer_scope_state: "UNVERIFIED_SCOPE",
-          },
-          contract_enforcement: {
-            one_sided_change_rejected: true,
-            explanation:
-              "Unverified candidate proposals cannot mutate official policy or override missing department scope grounding.",
-          },
-          recomputed_proposal: {
-            candidate_id: scenario.candidate_id,
-            proposed_relation: "INCONCLUSIVE",
-            status: "PROPOSAL_ONLY",
-            semantic_support: "NOT_VERIFIED",
-            human_review_required: true,
-            abstain: true,
-            citations_count: scenario.provenance_details.length,
-            uncertainty_reasons: [
-              `DEPARTMENT_${selectedDept}_UNGROUNDED`,
-              "APPLICABILITY_AUDIT_FAILED",
-              "HUMAN_REVIEW_REQUIRED",
-            ],
-          },
-          recomputed_core_result: {
-            classification: "INCONCLUSIVE",
-            proposed_classification: scenario.proposed_relation,
-            human_review_required: true,
-            official_policy_mutated: false,
-            uncertainty_reasons: [
-              `DEPARTMENT_${selectedDept}_UNGROUNDED`,
-              "QUOTE_PROVENANCE_ONLY",
-              "SEMANTIC_SUPPORT_NOT_VERIFIED",
-            ],
-            impact_status: "INCONCLUSIVE",
-          },
-          differentiator_takeaway: `Challenging ${selectedDept} applicability exposes ungrounded scope assumptions: the engine abstains and recomputes the proposal from ${scenario.proposed_relation} to INCONCLUSIVE while preserving immutable audit history.`,
-        };
-        setChallenge(syntheticChallenge);
-        setHistoryEvents((prev) => [
-          ...prev,
-          {
-            sequence_number: nextSeq,
-            timestamp_iso: new Date().toISOString(),
-            scenario_id: selectedScenarioId,
-            target_department: selectedDept,
-            target_side: "OLDER_AND_NEWER",
-            applicability_status: "UNGROUNDED",
-            initial_relation: scenario.proposed_relation,
-            recomputed_relation: "INCONCLUSIVE",
-            core_classification: "INCONCLUSIVE",
-            uncertainty_reasons: syntheticChallenge.recomputed_core_result.uncertainty_reasons,
-            contract_enforced: true,
-            summary: `Department ${selectedDept} applicability challenged; proposal recomputed from ${scenario.proposed_relation} to INCONCLUSIVE.`,
-          },
-        ]);
-      } else {
-        setChallengeError((e as Error).message);
-      }
+      // P0.2: Show visible error when challenge fails
+      setChallengeError((e as Error).message);
     } finally {
       setChallenging(false);
     }
-  }, [scenario, selectedDept, selectedScenarioId, sessionId, offlineDemoMode, historyEvents.length]);
+  }, [scenario, selectedDept, selectedScenarioId, sessionId, explicitOfflineDemo, historyEvents.length]);
 
   const startNewInvestigation = useCallback(async () => {
     if (!sessionId) return;
     setResetting(true);
     setChallengeError("");
     try {
-      if (!offlineDemoMode) {
+      if (!explicitOfflineDemo) {
         await demoApi<{ session_id: string; scenario_id: string; event_count: number }>(
           `/session/${sessionId}/reset`,
           {
@@ -613,7 +637,7 @@ export default function PolicyDemoPage() {
     } finally {
       setResetting(false);
     }
-  }, [sessionId, selectedScenarioId, offlineDemoMode]);
+  }, [sessionId, selectedScenarioId, explicitOfflineDemo]);
 
   const card: React.CSSProperties = {
     background: "#fbfaf6",
@@ -648,16 +672,17 @@ export default function PolicyDemoPage() {
           </span>
         </a>
         <div className="top-context">
-          <span className="pulse" /> {offlineDemoMode ? "OFFLINE FIXTURE MODE" : "POLICY DEMO API (PORT 8083)"}{" "}
+          <span className="pulse" />{" "}
+          {explicitOfflineDemo ? "EXPLICIT DEMO FIXTURE MODE (OPT-IN)" : "POLICY DEMO API · 127.0.0.1:8083"}{" "}
           <span className="divider">/</span> MULTIMODAL EVIDENCE STUDIO
         </div>
         <div className="nav-actions">
           <div className="mode-switcher" role="navigation" aria-label="Workspace mode">
             <a href="#" className="mode-pill">
-              ← 01 · Handover Investigator
+              ← 01 · Handover Copilot (Port 8000)
             </a>
             <a href="#/demo" className="mode-pill active">
-              02 · Policy & SAM 3.1 Studio
+              02 · Isolated Policy Demo (Port 8083)
             </a>
           </div>
           <div className="profile">
@@ -675,7 +700,7 @@ export default function PolicyDemoPage() {
         <div className="eyebrow" style={{ marginBottom: 20 }}>
           <span>FIELD NOTE 02</span>
           <span className="line" />
-          <span>POLICY EVIDENCE & SAM 3.1 MULTIMODAL AUDIT STUDIO</span>
+          <span>POLICY EVIDENCE &amp; SAM 3.1 MULTIMODAL AUDIT STUDIO</span>
         </div>
 
         <section className="intro">
@@ -701,7 +726,6 @@ export default function PolicyDemoPage() {
           </div>
         </section>
 
-        {/* ── Executive Telemetry Strip ── */}
         <section className="kpi-ribbon" aria-label="Policy engine telemetry">
           <div className="kpi-tile">
             <span className="kpi-label">CITATION PROVENANCE</span>
@@ -728,34 +752,67 @@ export default function PolicyDemoPage() {
         <aside className="synthetic-banner">
           <span className="banner-icon">✳</span>
           <div>
-            <strong>Synthetic demo · strict status boundaries · human review required</strong>
+            <strong>
+              {explicitOfflineDemo
+                ? "EXPLICIT DEMO FIXTURE MODE ACTIVE · NOT CONNECTED TO 127.0.0.1:8083"
+                : "Synthetic demo · strict status boundaries · human review required"}
+            </strong>
             <span>
               All policy data is fictional. Local SHA-256 citation provenance and SAM 3.1 visual region masks do not
               establish semantic support or legal applicability. Official policy is never mutated (
               <code>official_policy_mutated: false</code>).
             </span>
           </div>
-          <span className="banner-tag">{offlineDemoMode ? "OFFLINE FIXTURE" : "PORT 8083 READY"}</span>
+          {explicitOfflineDemo ? (
+            <button type="button" className="quick-fill-btn" onClick={() => setExplicitOfflineDemo(false)}>
+              Exit Demo Mode &amp; Reconnect Port 8083
+            </button>
+          ) : (
+            <span className="banner-tag">PORT 8083</span>
+          )}
         </aside>
 
         <aside
           style={{
             marginTop: 12,
             padding: "12px 16px",
-            background: offlineDemoMode ? "#f3ecdf" : "#e8eee6",
-            border: `1px solid ${offlineDemoMode ? "#e8d4b8" : "#d5e0d4"}`,
+            background: explicitOfflineDemo ? "#f3ecdf" : "#e8eee6",
+            border: `1px solid ${explicitOfflineDemo ? "#e8d4b8" : "#d5e0d4"}`,
             borderRadius: 3,
             fontSize: 11,
-            color: offlineDemoMode ? "#8a5c20" : "#315b47",
+            color: explicitOfflineDemo ? "#8a5c20" : "#315b47",
             lineHeight: 1.55,
           }}
         >
           <b>Service Boundary Notice (Studio 02 Isolation):</b> This Policy &amp; SAM 3.1 Studio is strictly decoupled
           from the main Handover Backend (<code>127.0.0.1:8000</code>).{" "}
-          {offlineDemoMode
-            ? "Currently running in explicit Offline Synthetic Fixture Mode because policy_demo_api.py (port 8083) is not running—no mock results are attributed to the main backend."
-            : "Connected to the isolated policy_demo_api.py service on 127.0.0.1:8083."}
+          {explicitOfflineDemo
+            ? "Explicit Demo Fixture Mode was manually selected by the user — no results are attributed to the main backend or live port 8083 service."
+            : "Targeting the isolated policy_demo_api.py service on 127.0.0.1:8083."}
         </aside>
+
+        {/* P0.2: Visible error alert with explicit opt-in demo button */}
+        {error && (
+          <div
+            className="error"
+            role="alert"
+            style={{
+              marginTop: 20,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: 12,
+            }}
+          >
+            <div>
+              <strong>Policy Demo API Error:</strong> {error}
+            </div>
+            <button type="button" className="quick-fill-btn" onClick={() => setExplicitOfflineDemo(true)}>
+              Enable Explicit Demo Fixture Mode
+            </button>
+          </div>
+        )}
 
         {/* ── Scenario Selector Pills + Dropdown ───────────────────────────── */}
         <div style={{ ...card, marginTop: 24, padding: "18px 22px" }}>
@@ -880,17 +937,9 @@ export default function PolicyDemoPage() {
             LOADING SCENARIO…
           </div>
         )}
-        {error && (
-          <div className="error" role="alert" style={{ marginTop: 20 }}>
-            {error}
-          </div>
-        )}
 
         {scenario && (
           <>
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 1: Policy Versions Panel
-            ────────────────────────────────────────────────────────────── */}
             <SectionHeading
               num="01 — POLICY VERSIONS"
               title={
@@ -1016,9 +1065,6 @@ export default function PolicyDemoPage() {
               })()}
             </div>
 
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 2: Proposal vs Assessment Panel
-            ────────────────────────────────────────────────────────────── */}
             <SectionHeading
               num="02 — PROPOSAL vs ASSESSMENT"
               title="Candidate proposal vs. validated system classification"
@@ -1102,9 +1148,6 @@ export default function PolicyDemoPage() {
               </div>
             </div>
 
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 3: Evidence Inspector + Interactive SVG SAM 3.1 Layer
-            ────────────────────────────────────────────────────────────── */}
             <SectionHeading
               num="03 — EVIDENCE & MULTIMODAL INSPECTOR"
               title="Local SHA-256 citation provenance & SAM 3.1 visual region isolation"
@@ -1193,7 +1236,6 @@ export default function PolicyDemoPage() {
               ))}
             </div>
 
-            {/* ── Interactive SVG SAM 3.1 Multimodal Visual Evidence Inspector ── */}
             <div className="sam-inspector-card" style={{ marginTop: 18 }}>
               <div className="sam-header">
                 <div>
@@ -1222,7 +1264,6 @@ export default function PolicyDemoPage() {
                     <span className="sam-coord-tag">PROVENANCE: VISUAL_REGION_ISOLATION</span>
                   </div>
 
-                  {/* Interactive SVG Visual Blueprint Stage */}
                   <svg
                     viewBox="0 0 520 175"
                     className="sam-svg-blueprint"
@@ -1241,7 +1282,6 @@ export default function PolicyDemoPage() {
                     </defs>
                     <rect width="520" height="175" fill="url(#samGrid)" />
 
-                    {/* V1 Visual Artifact Frame */}
                     <rect
                       x="14"
                       y="16"
@@ -1261,7 +1301,6 @@ export default function PolicyDemoPage() {
                       {visualEvidence.olderVisualNote.slice(42)}
                     </text>
 
-                    {/* V2 Visual Artifact Frame */}
                     <rect
                       x="271"
                       y="16"
@@ -1281,7 +1320,6 @@ export default function PolicyDemoPage() {
                       {visualEvidence.newerVisualNote.slice(42)}
                     </text>
 
-                    {/* SAM 3.1 Segmented Bounding Boxes & Polygon Masks */}
                     {showSamMask && (
                       <g>
                         <rect
@@ -1360,9 +1398,6 @@ export default function PolicyDemoPage() {
               </div>
             </div>
 
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 4: Reviewer Challenge Panel
-            ────────────────────────────────────────────────────────────── */}
             <SectionHeading
               num="04 — REVIEWER CHALLENGE"
               title="Multi-turn department applicability challenge"
@@ -1555,73 +1590,6 @@ export default function PolicyDemoPage() {
               </div>
             </div>
 
-            {/* ── Interactive SVG Dependency Graph & Impact Planner Preview ── */}
-            <div style={{ ...card, marginTop: 18, background: "#f7f6f0", borderStyle: "dashed" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-                <div>
-                  <SectionKicker>04B — IN-MEMORY DEPENDENCY GRAPH & IMPACT PLANNER TOPOLOGY</SectionKicker>
-                  <p style={{ margin: 0, fontSize: 12, color: "#57645b" }}>
-                    Typed graph and bounded challenge propagation exist in backend Python modules; rendered below as an
-                    explicit architectural boundary preview (no live JSON route claimed):
-                  </p>
-                </div>
-                <Badge text="INTERNAL PLANNER BOUNDARY · SYNTHETIC TOPOLOGY PREVIEW" color="muted" />
-              </div>
-
-              <svg
-                viewBox="0 0 680 110"
-                style={{ width: "100%", height: "auto", marginTop: 14, background: "#f1f0e8", borderRadius: 3, border: "1px solid #dfdfd6" }}
-                role="img"
-                aria-label="In-memory dependency propagation preview"
-              >
-                {/* Edges */}
-                <line x1="155" y1="55" x2="255" y2="55" stroke="#9da79b" strokeWidth="2" strokeDasharray="4 2" />
-                <line x1="415" y1="55" x2="505" y2="32" stroke="#b45c37" strokeWidth="2" />
-                <line x1="415" y1="55" x2="505" y2="80" stroke="#758078" strokeWidth="1.5" strokeDasharray="3 3" />
-
-                {/* Node 1: Policy Pair */}
-                <rect x="15" y="30" width="140" height="50" rx="3" fill="#fbfaf6" stroke="#285f4d" strokeWidth="1.5" />
-                <text x="25" y="48" fontSize="8" fontFamily="monospace" fill="#758078">POLICY REVISION NODE</text>
-                <text x="25" y="64" fontSize="10" fontFamily="monospace" fontWeight="bold" fill="#285f4d">
-                  {selectedScenarioId.toUpperCase()} (v1→v2)
-                </text>
-
-                {/* Node 2: Challenged Scope */}
-                <rect x="255" y="28" width="160" height="54" rx="3" fill="#f4e8de" stroke="#b45c37" strokeWidth="1.5" />
-                <text x="265" y="46" fontSize="8" fontFamily="monospace" fill="#b45c37">DIRECTLY_CHALLENGED</text>
-                <text x="265" y="62" fontSize="10" fontFamily="monospace" fontWeight="bold" fill="#27322f">
-                  DEPT: {selectedDept}
-                </text>
-                <text x="265" y="74" fontSize="8" fontFamily="monospace" fill="#8a5c20">
-                  {challenge ? "STATUS: UNGROUNDED" : "AWAITING CHALLENGE"}
-                </text>
-
-                {/* Node 3: Reassessment Required */}
-                <rect x="505" y="12" width="160" height="40" rx="3" fill="#f3ecdf" stroke="#8a5c20" strokeWidth="1.2" />
-                <text x="515" y="28" fontSize="7.5" fontFamily="monospace" fill="#8a5c20">REASSESSMENT_REQUIRED</text>
-                <text x="515" y="42" fontSize="9" fontFamily="monospace" fontWeight="bold" fill="#27322f">
-                  SOP_SHIFT_BRIEFING
-                </text>
-
-                {/* Node 4: Blocked by Missing Provenance */}
-                <rect x="505" y="60" width="160" height="40" rx="3" fill="#ede8f5" stroke="#583c87" strokeWidth="1.2" />
-                <text x="515" y="76" fontSize="7.5" fontFamily="monospace" fill="#583c87">BLOCKED_MISSING_PROV</text>
-                <text x="515" y="90" fontSize="9" fontFamily="monospace" fontWeight="bold" fill="#27322f">
-                  PROPERTY_SCOPE_LINK
-                </text>
-              </svg>
-
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
-                <Badge text={`DIRECTLY_CHALLENGED: ${selectedDept}`} color="orange" />
-                <Badge text="REASSESSMENT_REQUIRED: SOP_SHIFT_BRIEFING" color="review" />
-                <Badge text="POTENTIALLY_AFFECTED: SHIFT_HANDOVER_LOG" color="muted" />
-                <Badge text="BLOCKED_BY_MISSING_PROVENANCE: PROPERTY_SCOPE_LINK" color="purple" />
-              </div>
-            </div>
-
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 5: Audit Trail
-            ────────────────────────────────────────────────────────────── */}
             <SectionHeading
               num="05 — AUDIT TRAIL"
               title="Investigation timeline (in-memory session audit log)"

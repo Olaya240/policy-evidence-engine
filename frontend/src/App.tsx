@@ -11,10 +11,46 @@ type ExplanationTraceRule = {
   weight?: number;
 };
 
+type EvidenceDispositionItem = {
+  source_record_id?: string;
+  record_id?: string;
+  codes?: string[];
+  disposition?: string;
+  reason?: string;
+};
+
+type AdvisoryCoverageCategory = {
+  category?: string;
+  category_id?: string;
+  id?: string;
+  name?: string;
+  label?: string;
+  status?: "COVERED" | "NOT_COVERED" | string;
+  state?: "COVERED" | "NOT_COVERED" | string;
+  covered?: boolean;
+  details?: string;
+  description?: string;
+  matching_evidence_ids?: string[];
+  fresh_accepted_support_ids?: string[];
+  fresh_accepted_contradiction_ids?: string[];
+  independent_source_groups?: string[];
+  source_groups?: string[];
+  source_record_ids?: string[];
+};
+
 type ExplanationTrace = {
   status_rule_id?: string;
   confidence_rule_id?: string;
-  evidence_dispositions?: Record<string, string> | Array<{ source_record_id?: string; record_id?: string; disposition: string; reason?: string }>;
+  evidence_dispositions?:
+    | Record<string, { codes?: string[]; disposition?: string; reason?: string } | string[] | string>
+    | EvidenceDispositionItem[];
+  advisory_coverage?: {
+    categories?:
+      | AdvisoryCoverageCategory[]
+      | Record<string, AdvisoryCoverageCategory | "COVERED" | "NOT_COVERED" | string>;
+    note?: string;
+    disclaimer?: string;
+  };
   rules_triggered?: ExplanationTraceRule[];
   notes?: string[];
 };
@@ -88,6 +124,8 @@ type RecordItem = {
   source_group?: string;
 };
 
+type WorkspaceSection = "overview" | "investigations" | "library" | "history";
+
 const HYPOTHESES: Record<string, string> = {
   CHECKLIST_UNAVAILABLE: "Checklist unavailable",
   TRAINING_GAP: "Training gap",
@@ -96,31 +134,36 @@ const HYPOTHESES: Record<string, string> = {
   TIME_PRESSURE: "Time pressure",
 };
 
-// Exact 4 canonical presets and questions expected by the backend (Point #1 & #2)
+// P0.1: Exact 4 canonical presets and questions expected by the backend
 const PRESETS = [
   {
     preset_id: "handover_omissions",
     label: "Recurring handover omissions",
-    question: "Why do handover notes keep missing open guest requests?",
+    question: "Did time pressure contribute to recurring handover omissions?",
+    description: "Evaluate whether shift changeover time pressure and concurrent operational factors drove omitted guest requests.",
   },
   {
     preset_id: "checklist_access",
     label: "Checklist access",
     question: "Did checklist availability contribute to missing handover information?",
+    description: "Assess whether template locks or missing checklist access prevented structured shift handover logging.",
   },
   {
     preset_id: "desk_coverage",
     label: "Desk coverage",
     question: "Did staffing constraints affect how guest requests were handed over?",
+    description: "Examine single-agent desk coverage and staffing bottlenecks across front office and housekeeping shifts.",
   },
   {
     preset_id: "property_system",
     label: "Property system",
     question: "Did property system interruptions affect handover note completion?",
+    description: "Inspect PMS sync telemetry and terminal availability during shift handover windows.",
   },
 ];
 
-const FALLBACK_RECORDS: RecordItem[] = [
+// Explicit opt-in demo fixtures (NEVER loaded silently on backend errors)
+const EXPLICIT_DEMO_RECORDS: RecordItem[] = [
   {
     id: "REC-101",
     timestamp: "2026-10-29T14:20:00Z",
@@ -163,8 +206,8 @@ const FALLBACK_RECORDS: RecordItem[] = [
   },
 ];
 
-const FALLBACK_INVESTIGATION: Investigation = {
-  id: "inv-syn-01",
+const EXPLICIT_DEMO_INVESTIGATION: Investigation = {
+  id: "inv-explicit-demo-01",
   question: PRESETS[0].question,
   created_at: new Date().toISOString(),
   version: 1,
@@ -184,19 +227,40 @@ const FALLBACK_INVESTIGATION: Investigation = {
       explanation_trace: {
         status_rule_id: "STATUS_SUPPORTED_BY_ACCEPTED_EVIDENCE",
         confidence_rule_id: "CONF_BASE_PLUS_CORROBORATION",
-        evidence_dispositions: { "REC-101": "COUNTED_SUPPORTS (EXACT_SUBSTRING_VERIFIED)" },
+        evidence_dispositions: [
+          {
+            source_record_id: "REC-101",
+            codes: ["ACCEPTED_SUPPORT", "EXACT_SUBSTRING_VERIFIED", "ACTIVE_IN_SCORING"],
+          },
+        ],
+        advisory_coverage: {
+          categories: [
+            {
+              category: "SHIFT_LOG_OBSERVATION",
+              status: "COVERED",
+              matching_evidence_ids: ["REC-101"],
+              fresh_accepted_support_ids: ["REC-101"],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: ["shift_logs"],
+              details: "Direct shift log record REC-101 present",
+            },
+            {
+              category: "PAPER_FALLBACK_VERIFICATION",
+              status: "NOT_COVERED",
+              matching_evidence_ids: [],
+              fresh_accepted_support_ids: [],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: [],
+              details: "Desk B physical binder not ingested",
+            },
+          ],
+        },
         rules_triggered: [
           {
             rule_id: "RULE_EXACT_SUBSTRING_MATCH",
             description: "Quoted text verified as exact substring of source REC-101.",
             applied: true,
             weight: 0.8,
-          },
-          {
-            rule_id: "RULE_NO_ACTIVE_DISPUTE",
-            description: "No human challenge currently flags REC-101.",
-            applied: true,
-            weight: 0.2,
           },
         ],
       },
@@ -229,15 +293,32 @@ const FALLBACK_INVESTIGATION: Investigation = {
       explanation_trace: {
         status_rule_id: "STATUS_PARTIAL_WITH_CONFLICT",
         confidence_rule_id: "CONF_PENALIZED_BY_GAP",
-        evidence_dispositions: { "REC-102": "COUNTED_SUPPORTS (CONFLICT_PRESENT)" },
-        rules_triggered: [
+        evidence_dispositions: [
           {
-            rule_id: "RULE_SUPPORT_WITH_MISSING_CONTEXT",
-            description: "Training gap verified in REC-102, but shift pairing log is absent.",
-            applied: true,
-            weight: 0.58,
+            source_record_id: "REC-102",
+            codes: ["ACCEPTED_SUPPORT", "CONFLICT_PRESENT_IN_CLAIM"],
           },
         ],
+        advisory_coverage: {
+          categories: [
+            {
+              category: "TRAINING_COMPLETION_LOG",
+              status: "COVERED",
+              matching_evidence_ids: ["REC-102"],
+              fresh_accepted_support_ids: ["REC-102"],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: ["training_records"],
+            },
+            {
+              category: "ROSTER_PAIRING_ASSIGNMENT",
+              status: "NOT_COVERED",
+              matching_evidence_ids: [],
+              fresh_accepted_support_ids: [],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: [],
+            },
+          ],
+        },
       },
       evidence: [
         {
@@ -268,15 +349,32 @@ const FALLBACK_INVESTIGATION: Investigation = {
       explanation_trace: {
         status_rule_id: "STATUS_PARTIAL_SINGLE_SOURCE",
         confidence_rule_id: "CONF_MODERATE_SINGLE_GROUP",
-        evidence_dispositions: { "REC-104": "COUNTED_SUPPORTS (SINGLE_SOURCE_GROUP)" },
-        rules_triggered: [
+        evidence_dispositions: [
           {
-            rule_id: "RULE_SINGLE_DEPARTMENT_SOURCE",
-            description: "Supported by REC-104; capped at PARTIAL until cross-department roster is linked.",
-            applied: true,
-            weight: 0.64,
+            source_record_id: "REC-104",
+            codes: ["ACCEPTED_SUPPORT", "SINGLE_SOURCE_GROUP"],
           },
         ],
+        advisory_coverage: {
+          categories: [
+            {
+              category: "DESK_SHIFT_LOG",
+              status: "COVERED",
+              matching_evidence_ids: ["REC-104"],
+              fresh_accepted_support_ids: ["REC-104"],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: ["shift_logs"],
+            },
+            {
+              category: "DUTY_MANAGER_ROSTER",
+              status: "NOT_COVERED",
+              matching_evidence_ids: [],
+              fresh_accepted_support_ids: [],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: [],
+            },
+          ],
+        },
       },
       evidence: [
         {
@@ -307,15 +405,32 @@ const FALLBACK_INVESTIGATION: Investigation = {
       explanation_trace: {
         status_rule_id: "STATUS_INSUFFICIENT_UNVERIFIED_GUARD",
         confidence_rule_id: "CONF_FLOOR_NO_ACCEPTED_SUPPORT",
-        evidence_dispositions: { "REC-108": "EXCLUDED_UNVERIFIED (PHRASE_CUE_GUARD_DOWNGRADED)" },
-        rules_triggered: [
+        evidence_dispositions: [
           {
-            rule_id: "RULE_PHRASE_CUE_GUARD_DOWNGRADE",
-            description: "Proposed SUPPORTS downgraded to NEUTRAL/UNVERIFIED; not counted as claim evidence.",
-            applied: true,
-            weight: 0.34,
+            source_record_id: "REC-108",
+            codes: ["DOWNGRADED_TO_NEUTRAL", "PHRASE_CUE_GUARD_TRIGGERED", "EXCLUDED_FROM_SUPPORT"],
           },
         ],
+        advisory_coverage: {
+          categories: [
+            {
+              category: "MORNING_AUDIT_TELEMETRY",
+              status: "COVERED",
+              matching_evidence_ids: ["REC-108"],
+              fresh_accepted_support_ids: [],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: ["telemetry"],
+            },
+            {
+              category: "AFTERNOON_HANDOVER_TELEMETRY",
+              status: "NOT_COVERED",
+              matching_evidence_ids: [],
+              fresh_accepted_support_ids: [],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: [],
+            },
+          ],
+        },
       },
       evidence: [
         {
@@ -347,15 +462,32 @@ const FALLBACK_INVESTIGATION: Investigation = {
       explanation_trace: {
         status_rule_id: "STATUS_SUPPORTED_DIRECT_TIMELINE_MATCH",
         confidence_rule_id: "CONF_HIGH_DIRECT_EVIDENCE",
-        evidence_dispositions: { "REC-112": "COUNTED_SUPPORTS (ACCEPTED)" },
-        rules_triggered: [
+        evidence_dispositions: [
           {
-            rule_id: "RULE_TEMPORAL_OVERLAP_VERIFIED",
-            description: "REC-112 documents acute briefing compression during the 15:00 handover window.",
-            applied: true,
-            weight: 0.72,
+            source_record_id: "REC-112",
+            codes: ["ACCEPTED_SUPPORT", "TEMPORAL_OVERLAP_VERIFIED"],
           },
         ],
+        advisory_coverage: {
+          categories: [
+            {
+              category: "SHIFT_TRANSITION_TIMELINE",
+              status: "COVERED",
+              matching_evidence_ids: ["REC-112"],
+              fresh_accepted_support_ids: ["REC-112"],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: ["shift_logs"],
+            },
+            {
+              category: "LOBBY_QUEUE_SENSOR_LOG",
+              status: "NOT_COVERED",
+              matching_evidence_ids: [],
+              fresh_accepted_support_ids: [],
+              fresh_accepted_contradiction_ids: [],
+              independent_source_groups: [],
+            },
+          ],
+        },
       },
       evidence: [
         {
@@ -420,14 +552,23 @@ function normalizeError(body: unknown, status: number): string {
       return "message" in detail ? String((detail as { message: unknown }).message) : JSON.stringify(detail);
     }
   }
-  return `Request failed (${status})`;
+  return `Backend request failed (HTTP ${status})`;
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`/api${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json", ...init?.headers },
+    });
+  } catch (err) {
+    throw new Error(
+      `Cannot reach main backend at 127.0.0.1:8000 (/api${path}). Verify the FastAPI server is running. (${
+        (err as Error).message
+      })`
+    );
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(normalizeError(body, response.status));
@@ -446,24 +587,121 @@ function extractClaimFromSnapshot(
   return map[claimId] ?? map[hypothesisId] ?? Object.values(map)[0] ?? null;
 }
 
-function renderEvidenceDispositions(
+// P1.1: Parse evidence_dispositions supporting `codes: string[]` in both array and keyed-object shapes
+function parseEvidenceDispositions(
   dispositions: ExplanationTrace["evidence_dispositions"]
-): Array<{ key: string; value: string }> {
+): Array<{ recordKey: string; codes: string[]; note?: string }> {
   if (!dispositions) return [];
+
   if (Array.isArray(dispositions)) {
-    return dispositions.map((item, idx) => ({
-      key: item.source_record_id || item.record_id || `EV-${idx + 1}`,
-      value: item.reason ? `${item.disposition} (${item.reason})` : item.disposition,
-    }));
+    return dispositions.map((item, idx) => {
+      const recordKey = item.source_record_id || item.record_id || `EV-${idx + 1}`;
+      const codes = Array.isArray(item.codes)
+        ? item.codes.map(String)
+        : item.disposition
+        ? [String(item.disposition)]
+        : [];
+      return { recordKey, codes, note: item.reason };
+    });
   }
-  return Object.entries(dispositions).map(([key, value]) => ({
-    key,
-    value: typeof value === "string" ? value : JSON.stringify(value),
-  }));
+
+  return Object.entries(dispositions).map(([key, val]) => {
+    if (Array.isArray(val)) {
+      return { recordKey: key, codes: val.map(String) };
+    }
+    if (val && typeof val === "object") {
+      const obj = val as { codes?: unknown; disposition?: unknown; reason?: unknown };
+      const codes = Array.isArray(obj.codes)
+        ? obj.codes.map(String)
+        : typeof obj.disposition === "string"
+        ? [obj.disposition]
+        : [];
+      return {
+        recordKey: key,
+        codes,
+        note: typeof obj.reason === "string" ? obj.reason : undefined,
+      };
+    }
+    return { recordKey: key, codes: [String(val)] };
+  });
+}
+
+// P1.2 & PDF Section 5C: Parse structured advisory_coverage.categories including matching/fresh IDs & source groups
+function parseAdvisoryCoverageCategories(
+  advisory: ExplanationTrace["advisory_coverage"]
+): Array<{
+  name: string;
+  state: "COVERED" | "NOT_COVERED" | string;
+  details?: string;
+  matchingIds: string[];
+  freshSupportIds: string[];
+  freshContradictionIds: string[];
+  independentGroups: string[];
+}> {
+  if (!advisory || !advisory.categories) return [];
+  const raw = advisory.categories;
+
+  const toStrArray = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
+
+  if (Array.isArray(raw)) {
+    return raw.map((item, idx) => {
+      const name = item.category || item.category_id || item.id || item.name || item.label || `CATEGORY_${idx + 1}`;
+      const state =
+        item.status ||
+        item.state ||
+        (typeof item.covered === "boolean" ? (item.covered ? "COVERED" : "NOT_COVERED") : "NOT_COVERED");
+      return {
+        name: String(name),
+        state: String(state).toUpperCase(),
+        details: item.details || item.description,
+        matchingIds: toStrArray(item.matching_evidence_ids ?? item.source_record_ids),
+        freshSupportIds: toStrArray(item.fresh_accepted_support_ids),
+        freshContradictionIds: toStrArray(item.fresh_accepted_contradiction_ids),
+        independentGroups: toStrArray(item.independent_source_groups ?? item.source_groups),
+      };
+    });
+  }
+
+  return Object.entries(raw).map(([key, val]) => {
+    if (typeof val === "string") {
+      return {
+        name: key,
+        state: val.toUpperCase(),
+        matchingIds: [],
+        freshSupportIds: [],
+        freshContradictionIds: [],
+        independentGroups: [],
+      };
+    }
+    if (val && typeof val === "object") {
+      const state =
+        val.status ||
+        val.state ||
+        (typeof val.covered === "boolean" ? (val.covered ? "COVERED" : "NOT_COVERED") : "NOT_COVERED");
+      return {
+        name: val.category || val.category_id || val.id || val.name || val.label || key,
+        state: String(state).toUpperCase(),
+        details: val.details || val.description,
+        matchingIds: toStrArray(val.matching_evidence_ids ?? val.source_record_ids),
+        freshSupportIds: toStrArray(val.fresh_accepted_support_ids),
+        freshContradictionIds: toStrArray(val.fresh_accepted_contradiction_ids),
+        independentGroups: toStrArray(val.independent_source_groups ?? val.source_groups),
+      };
+    }
+    return {
+      name: key,
+      state: "NOT_COVERED",
+      matchingIds: [],
+      freshSupportIds: [],
+      freshContradictionIds: [],
+      independentGroups: [],
+    };
+  });
 }
 
 function App() {
   const [showDemo, setShowDemo] = useState(window.location.hash === "#/demo");
+  const [activeSection, setActiveSection] = useState<WorkspaceSection>("investigations");
   const [records, setRecords] = useState<RecordItem[]>([]);
   const [investigation, setInvestigation] = useState<Investigation | null>(null);
   const [history, setHistory] = useState<History[]>([]);
@@ -475,14 +713,24 @@ function App() {
   const [change, setChange] = useState<{
     before: Claim;
     after: Claim;
-    version: number;
+    beforeVersion: number;
+    afterVersion: number;
     recomputedIds: string[];
     reason: string;
-    disputedCount: number;
+    disputedIds: string[];
   } | null>(null);
+  const [inspectedHistoryVersion, setInspectedHistoryVersion] = useState<number | null>(null);
+  const [expandedEvidenceKey, setExpandedEvidenceKey] = useState<string | null>(null);
+  // Evidence Library search & filters (PDF Section 8)
+  const [libraryQuery, setLibraryQuery] = useState("");
+  const [libraryDeptFilter, setLibraryDeptFilter] = useState("ALL");
+  const [libraryGroupFilter, setLibraryGroupFilter] = useState("ALL");
+  const [expandedRecordId, setExpandedRecordId] = useState<string | null>(null);
+
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [offlineMode, setOfflineMode] = useState(false);
+  // P0.2: Explicit opt-in demo mode only — false by default, never activated silently
+  const [explicitDemoMode, setExplicitDemoMode] = useState(false);
 
   useEffect(() => {
     const handler = () => setShowDemo(window.location.hash === "#/demo");
@@ -501,17 +749,58 @@ function App() {
     return next;
   }, []);
 
-  useEffect(() => {
+  const loadRecordsFromBackend = useCallback(() => {
+    setError("");
     api<RecordItem[]>("/records")
       .then((data) => {
         setRecords(data);
-        setOfflineMode(false);
+        setExplicitDemoMode(false);
       })
-      .catch(() => {
-        setRecords(FALLBACK_RECORDS);
-        setOfflineMode(true);
+      .catch((e: Error) => {
+        // P0.2: No silent fallback to mock records. Clear records and surface error clearly.
+        setRecords([]);
+        setError(e.message);
       });
   }, []);
+
+  useEffect(() => {
+    loadRecordsFromBackend();
+  }, [loadRecordsFromBackend]);
+
+  function enableExplicitDemoMode() {
+    setExplicitDemoMode(true);
+    setError("");
+    setRecords(EXPLICIT_DEMO_RECORDS);
+    const chosen = PRESETS[selectedPresetIndex];
+    const demoInv: Investigation = {
+      ...EXPLICIT_DEMO_INVESTIGATION,
+      question: chosen.question,
+      preset_id: chosen.preset_id,
+      created_at: new Date().toISOString(),
+    };
+    setInvestigation(demoInv);
+    setSelectedId(demoInv.claims[0].id);
+    setSourceId(demoInv.claims[0].dependencies[0] ?? "");
+    setQuote(EXPLICIT_DEMO_RECORDS[0].text);
+    setHistory([
+      {
+        version: 1,
+        created_at: new Date().toISOString(),
+        event: "CREATED",
+        evidence_changes: [],
+        recomputed_claim_ids: demoInv.claims.map((c) => c.hypothesis_id),
+      },
+    ]);
+  }
+
+  function exitExplicitDemoMode() {
+    setExplicitDemoMode(false);
+    setInvestigation(null);
+    setHistory([]);
+    setChange(null);
+    setInspectedHistoryVersion(null);
+    loadRecordsFromBackend();
+  }
 
   const selected = useMemo(
     () => investigation?.claims.find((claim) => claim.id === selectedId) ?? null,
@@ -519,24 +808,111 @@ function App() {
   );
   const chosenRecord = useMemo(() => records.find((record) => record.id === sourceId), [records, sourceId]);
 
+  const inspectedHistoryEntry = useMemo(
+    () => history.find((h) => h.version === inspectedHistoryVersion) ?? null,
+    [history, inspectedHistoryVersion]
+  );
+
+  // Dynamic Overview metrics strictly from real backend/state data (PDF Section 3)
   const statusCounts = useMemo(() => {
-    if (!investigation) return { supported: 0, partial: 0, insufficient: 0, disputed: 0 };
+    if (!investigation) {
+      return {
+        supported: 0,
+        partial: 0,
+        contradicted: 0,
+        insufficient: 0,
+        disputed: 0,
+        claimsUnderReview: 0,
+      };
+    }
     return {
       supported: investigation.claims.filter((c) => c.status === "SUPPORTED").length,
       partial: investigation.claims.filter((c) => c.status === "PARTIAL").length,
-      insufficient: investigation.claims.filter((c) => c.status === "INSUFFICIENT" || c.status === "CONTRADICTED")
-        .length,
+      contradicted: investigation.claims.filter((c) => c.status === "CONTRADICTED").length,
+      insufficient: investigation.claims.filter((c) => c.status === "INSUFFICIENT").length,
       disputed: investigation.claims.reduce((acc, c) => acc + c.evidence.filter((e) => e.disputed).length, 0),
+      claimsUnderReview: investigation.claims.filter(
+        (c) => c.status !== "SUPPORTED" || c.evidence.some((e) => e.disputed || e.review_state === "UNVERIFIED")
+      ).length,
     };
   }, [investigation]);
+
+  const recentChallengesCount = useMemo(
+    () => history.filter((h) => h.event !== "CREATED").length,
+    [history]
+  );
+
+  // Source Independence groups for the currently selected claim (PDF Section 5D)
+  const selectedSourceGroups = useMemo(() => {
+    if (!selected) return [];
+    const groups = new Set<string>();
+    selected.evidence.forEach((ev) => {
+      if (ev.source_group) groups.add(ev.source_group);
+      else {
+        const rec = records.find((r) => r.id === ev.source_record_id);
+        if (rec?.source_group) groups.add(rec.source_group);
+      }
+    });
+    return Array.from(groups);
+  }, [selected, records]);
+
+  // Evidence Library filters (PDF Section 8)
+  const availableDepartments = useMemo(
+    () => Array.from(new Set(records.map((r) => r.department))).sort(),
+    [records]
+  );
+  const availableSourceGroups = useMemo(
+    () => Array.from(new Set(records.map((r) => r.source_group).filter(Boolean) as string[])).sort(),
+    [records]
+  );
+  const filteredLibraryRecords = useMemo(() => {
+    return records.filter((rec) => {
+      if (libraryDeptFilter !== "ALL" && rec.department !== libraryDeptFilter) return false;
+      if (libraryGroupFilter !== "ALL" && (rec.source_group ?? "") !== libraryGroupFilter) return false;
+      if (libraryQuery.trim()) {
+        const q = libraryQuery.trim().toLowerCase();
+        const matchId = rec.id.toLowerCase().includes(q);
+        const matchText = rec.text.toLowerCase().includes(q);
+        const matchTags = (rec.tags ?? []).some((t) => t.toLowerCase().includes(q));
+        if (!matchId && !matchText && !matchTags) return false;
+      }
+      return true;
+    });
+  }, [records, libraryDeptFilter, libraryGroupFilter, libraryQuery]);
 
   async function startInvestigation() {
     setBusy(true);
     setError("");
     setChange(null);
+    setInspectedHistoryVersion(null);
     const chosen = PRESETS[selectedPresetIndex];
+
+    if (explicitDemoMode) {
+      const demoInv: Investigation = {
+        ...EXPLICIT_DEMO_INVESTIGATION,
+        question: chosen.question,
+        preset_id: chosen.preset_id,
+        created_at: new Date().toISOString(),
+      };
+      setInvestigation(demoInv);
+      setSelectedId(demoInv.claims[0].id);
+      setSourceId(demoInv.claims[0].dependencies[0] ?? "");
+      setQuote(EXPLICIT_DEMO_RECORDS[0].text);
+      setHistory([
+        {
+          version: 1,
+          created_at: new Date().toISOString(),
+          event: "CREATED",
+          evidence_changes: [],
+          recomputed_claim_ids: demoInv.claims.map((c) => c.hypothesis_id),
+        },
+      ]);
+      setBusy(false);
+      return;
+    }
+
     try {
-      // Point #1 & #2: Send both preset_id and exact canonical question
+      // P0.1: Send both preset_id and exact canonical question
       const result = await api<Investigation>("/investigations", {
         method: "POST",
         body: JSON.stringify({
@@ -553,28 +929,9 @@ function App() {
         setQuote(rec?.text ?? "");
       }
       setHistory(await api<History[]>(`/investigations/${result.id}/history`));
-      setOfflineMode(false);
-    } catch {
-      const mockInv: Investigation = {
-        ...FALLBACK_INVESTIGATION,
-        question: chosen.question,
-        preset_id: chosen.preset_id,
-        created_at: new Date().toISOString(),
-      };
-      setInvestigation(mockInv);
-      setSelectedId(mockInv.claims[0].id);
-      setSourceId(mockInv.claims[0].dependencies[0] ?? "");
-      setQuote(FALLBACK_RECORDS[0].text);
-      setHistory([
-        {
-          version: 1,
-          created_at: new Date().toISOString(),
-          event: "CREATED",
-          evidence_changes: [],
-          recomputed_claim_ids: mockInv.claims.map((c) => c.hypothesis_id),
-        },
-      ]);
-      setOfflineMode(true);
+    } catch (e) {
+      // P0.2: Never fall back silently to mock data. Show visible error.
+      setError((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -587,6 +944,68 @@ function App() {
     setError("");
     setChange(null);
     const beforeFallback = selected;
+    const prevInvVersion = investigation.version;
+
+    if (explicitDemoMode) {
+      const nextVersion = investigation.version + 1;
+      const updatedEvidence = selected.evidence.map((ev) =>
+        ev.source_record_id === sourceId ? { ...ev, disputed: true } : ev
+      );
+      const afterClaim: Claim = {
+        ...selected,
+        status: "PARTIAL",
+        confidence: Math.max(0.28, selected.confidence - 0.24),
+        version: nextVersion,
+        uncertainty: `Human review flagged source ${sourceId}: "${reason.trim()}". Conclusion downgraded pending audit.`,
+        evidence: updatedEvidence,
+        explanation_trace: {
+          ...selected.explanation_trace,
+          status_rule_id: "STATUS_DOWNGRADED_BY_DISPUTED_SOURCE",
+          confidence_rule_id: "CONF_PENALTY_ACTIVE_CHALLENGE",
+          evidence_dispositions: [
+            {
+              source_record_id: sourceId,
+              codes: ["DISPUTED_BY_REVIEWER", "RETAINED_FOR_HUMAN_AUDIT", "WEIGHT_PENALIZED"],
+            },
+          ],
+        },
+      };
+      const beforeMap: Record<string, Claim> = { [selected.id]: beforeFallback };
+      const afterMap: Record<string, Claim> = { [selected.id]: afterClaim };
+      setInvestigation({
+        ...investigation,
+        version: nextVersion,
+        claims: investigation.claims.map((c) => (c.id === selected.id ? afterClaim : c)),
+      });
+      setChange({
+        before: beforeFallback,
+        after: afterClaim,
+        beforeVersion: prevInvVersion,
+        afterVersion: nextVersion,
+        recomputedIds: [selected.hypothesis_id],
+        reason: reason.trim(),
+        disputedIds: updatedEvidence.filter((ev) => ev.disputed).map((ev) => ev.source_record_id),
+      });
+      setHistory((prev) => [
+        ...prev,
+        {
+          version: nextVersion,
+          created_at: new Date().toISOString(),
+          event: "CHALLENGED",
+          claim_id: selected.id,
+          reason: reason.trim(),
+          before: beforeMap,
+          after: afterMap,
+          evidence_changes: [sourceId],
+          recomputed_claim_ids: [selected.hypothesis_id],
+        },
+      ]);
+      setInspectedHistoryVersion(nextVersion);
+      setReason("");
+      setBusy(false);
+      return;
+    }
+
     try {
       const challengeRes = await api<ChallengeResponsePayload>(
         `/investigations/${investigation.id}/claims/${selected.id}/challenge`,
@@ -607,75 +1026,23 @@ function App() {
         extractClaimFromSnapshot(challengeRes.after, selected.id, selected.hypothesis_id) ?? afterFromInv;
 
       if (afterSnap) {
-        const disputedCount = afterSnap.evidence.filter((e) => e.disputed).length;
+        const disputedIds = afterSnap.evidence.filter((e) => e.disputed).map((e) => e.source_record_id);
+        const revNum = challengeRes.version ?? updatedInv.version;
         setChange({
           before: beforeSnap,
           after: afterSnap,
-          version: challengeRes.version ?? afterSnap.version ?? updatedInv.version,
+          beforeVersion: prevInvVersion,
+          afterVersion: revNum,
           recomputedIds: challengeRes.recomputed_claim_ids ?? [selected.hypothesis_id],
           reason: challengeRes.reason ?? reason.trim(),
-          disputedCount,
+          disputedIds,
         });
+        setInspectedHistoryVersion(revNum);
       }
       setReason("");
     } catch (e) {
-      if (offlineMode) {
-        const nextVersion = investigation.version + 1;
-        const updatedEvidence = selected.evidence.map((ev) =>
-          ev.source_record_id === sourceId ? { ...ev, disputed: true } : ev
-        );
-        const afterClaim: Claim = {
-          ...selected,
-          status: "PARTIAL",
-          confidence: Math.max(0.28, selected.confidence - 0.24),
-          version: nextVersion,
-          uncertainty: `Human review flagged source ${sourceId}: "${reason.trim()}". Conclusion downgraded pending audit.`,
-          evidence: updatedEvidence,
-          explanation_trace: {
-            status_rule_id: "STATUS_DOWNGRADED_BY_DISPUTED_SOURCE",
-            confidence_rule_id: "CONF_PENALTY_ACTIVE_CHALLENGE",
-            evidence_dispositions: {
-              [sourceId]: "DISPUTED_RETAINED_FOR_HUMAN_REVIEW",
-            },
-            rules_triggered: [
-              {
-                rule_id: "RULE_CHALLENGED_EVIDENCE_PENALTY",
-                description: `Source ${sourceId} marked disputed; dependent claim recomputed at revision v${nextVersion}.`,
-                applied: true,
-                weight: -0.24,
-              },
-            ],
-          },
-        };
-        setInvestigation({
-          ...investigation,
-          version: nextVersion,
-          claims: investigation.claims.map((c) => (c.id === selected.id ? afterClaim : c)),
-        });
-        setChange({
-          before: beforeFallback,
-          after: afterClaim,
-          version: nextVersion,
-          recomputedIds: [selected.hypothesis_id],
-          reason: reason.trim(),
-          disputedCount: updatedEvidence.filter((ev) => ev.disputed).length,
-        });
-        setHistory((prev) => [
-          ...prev,
-          {
-            version: nextVersion,
-            created_at: new Date().toISOString(),
-            event: "CHALLENGED",
-            claim_id: selected.id,
-            reason: reason.trim(),
-            evidence_changes: [sourceId],
-            recomputed_claim_ids: [selected.hypothesis_id],
-          },
-        ]);
-        setReason("");
-      } else {
-        setError((e as Error).message);
-      }
+      // P0.2: Surface real backend challenge errors directly without silent mock fallback
+      setError((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -687,7 +1054,16 @@ function App() {
     setQuote(record?.text ?? "");
   }
 
+  function scrollToSection(section: WorkspaceSection, elementId: string) {
+    setActiveSection(section);
+    const el = document.getElementById(elementId);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   if (showDemo) return <PolicyDemoPage />;
+
+  const parsedDispositions = parseEvidenceDispositions(selected?.explanation_trace?.evidence_dispositions);
+  const parsedCoverageCategories = parseAdvisoryCoverageCategories(selected?.explanation_trace?.advisory_coverage);
 
   return (
     <div className="shell">
@@ -699,16 +1075,46 @@ function App() {
           </span>
         </a>
         <div className="top-context">
-          <span className="pulse" /> {offlineMode ? "OFFLINE SYNTHETIC FALLBACK" : "MAIN BACKEND · 127.0.0.1:8000"}{" "}
+          <span className="pulse" />{" "}
+          {explicitDemoMode ? "EXPLICIT DEMO FIXTURE MODE (OPT-IN)" : "LIVE BACKEND · 127.0.0.1:8000"}{" "}
           <span className="divider">/</span> STORY CONNECT AI COPILOT
         </div>
         <div className="nav-actions">
-          <div className="mode-switcher" role="navigation" aria-label="Workspace mode">
-            <a href="#top" className="mode-pill active">
-              01 · Handover Copilot (Port 8000)
-            </a>
+          <div className="mode-switcher" role="navigation" aria-label="Primary application navigation">
+            <button
+              type="button"
+              className={`mode-pill ${activeSection === "overview" ? "active" : ""}`}
+              onClick={() => scrollToSection("overview", "section-overview")}
+              style={{ border: 0, cursor: "pointer" }}
+            >
+              Overview
+            </button>
+            <button
+              type="button"
+              className={`mode-pill ${activeSection === "investigations" ? "active" : ""}`}
+              onClick={() => scrollToSection("investigations", "section-investigations")}
+              style={{ border: 0, cursor: "pointer" }}
+            >
+              Investigations
+            </button>
+            <button
+              type="button"
+              className={`mode-pill ${activeSection === "library" ? "active" : ""}`}
+              onClick={() => scrollToSection("library", "section-library")}
+              style={{ border: 0, cursor: "pointer" }}
+            >
+              Evidence Library ({records.length})
+            </button>
+            <button
+              type="button"
+              className={`mode-pill ${activeSection === "history" ? "active" : ""}`}
+              onClick={() => scrollToSection("history", "section-history")}
+              style={{ border: 0, cursor: "pointer" }}
+            >
+              Revision History ({history.length})
+            </button>
             <a href="#/demo" className="mode-pill">
-              02 · Isolated Policy Demo (Port 8083) ↗
+              Policy Demo Studio ↗
             </a>
           </div>
           <div className="profile">
@@ -723,7 +1129,6 @@ function App() {
       </header>
 
       <main id="top">
-        {/* ── Story Connect Platform Context Strip ── */}
         <div className="eyebrow">
           <span>STORY CONNECT LUXURY HOTEL PLATFORM</span>
           <span className="line" />
@@ -738,10 +1143,8 @@ function App() {
               <em>left behind.</em>
             </h1>
             <p>
-              Story Connect unifies luxury hotel HR policies, training, and shift operations across Administrators, HR
-              Managers, Department Managers, and Employees. The <strong>Story Connect AI Copilot</strong> adds
-              deterministic evidence verification, dependency tracking, and auditable reassessment so AI proposals never
-              override human governance.
+              Select Scenario → Start Investigation → Inspect Claims → Explore Evidence → Understand Decision Rules →
+              Challenge Evidence → Review Reassessment → Inspect Revision History.
             </p>
           </div>
           <div className="intro-stamp">
@@ -754,54 +1157,91 @@ function App() {
           </div>
         </section>
 
-        {/* ── Executive Telemetry Ribbon ── */}
-        <section className="kpi-ribbon" aria-label="Engine governance telemetry">
+        {/* ── PDF Section 3: Overview Dashboard Summary Cards (Strictly Live Backend Data) ── */}
+        <section id="section-overview" className="kpi-ribbon" aria-label="Overview dashboard metrics">
           <div className="kpi-tile">
-            <span className="kpi-label">EVIDENCE CORPUS</span>
-            <strong>{records.length} Source Records</strong>
-            <small>Exact-substring provenance</small>
+            <span className="kpi-label">TOTAL RECORDS</span>
+            <strong>{records.length}</strong>
+            <small>{explicitDemoMode ? "Explicit Demo Corpus" : "Loaded from GET /api/records"}</small>
           </div>
           <div className="kpi-tile">
-            <span className="kpi-label">EXPLANATION TRACE</span>
-            <strong>Rule IDs + Dispositions</strong>
-            <small>Deterministic engine authority</small>
+            <span className="kpi-label">ACTIVE INVESTIGATIONS</span>
+            <strong>{investigation ? `1 (Rev v${investigation.version})` : "0"}</strong>
+            <small>{investigation ? `Preset: ${investigation.preset_id ?? PRESETS[selectedPresetIndex].preset_id}` : "Start an investigation below"}</small>
           </div>
           <div className="kpi-tile">
-            <span className="kpi-label">PROVIDER SAFEGUARDS</span>
-            <strong>181 Focused Tests</strong>
-            <small>MockProvider default · Muse Spark gated</small>
+            <span className="kpi-label">CLAIMS UNDER REVIEW</span>
+            <strong>{investigation ? `${statusCounts.claimsUnderReview} / ${investigation.claims.length}` : "—"}</strong>
+            <small>
+              {investigation
+                ? `${statusCounts.supported} Supported · ${statusCounts.partial} Partial · ${statusCounts.insufficient} Insufficient`
+                : "Awaiting investigation run"}
+            </small>
           </div>
           <div className="kpi-tile">
-            <span className="kpi-label">GOVERNANCE GATE</span>
-            <strong>Append-Only Audit</strong>
-            <small>Atomic challenge recomputation</small>
+            <span className="kpi-label">RECENT CHALLENGES</span>
+            <strong>{recentChallengesCount}</strong>
+            <small>{statusCounts.disputed} disputed evidence item(s)</small>
           </div>
         </section>
 
         <aside className="synthetic-banner">
           <span className="banner-icon">✳</span>
           <div>
-            <strong>Synthetic hospitality case · decision support only · human review required</strong>
+            <strong>
+              {explicitDemoMode
+                ? "EXPLICIT DEMO FIXTURE MODE ACTIVE · NOT CONNECTED TO LIVE BACKEND"
+                : "Synthetic hospitality case · decision support only · human review required"}
+            </strong>
             <span>
               All records are fictional. Quote presence establishes exact-substring provenance only — not semantic
-              entailment or causation. Never use for employee ranking, blame, or employment decisions.
+              entailment or causation. Confidence is a fixed engine review heuristic, not a calibrated probability.
             </span>
           </div>
-          <span className="banner-tag">{offlineMode ? "OFFLINE FALLBACK" : "FASTAPI :8000"}</span>
+          {explicitDemoMode ? (
+            <button type="button" className="quick-fill-btn" onClick={exitExplicitDemoMode}>
+              Exit Demo Mode &amp; Reconnect Port 8000
+            </button>
+          ) : (
+            <span className="banner-tag">FASTAPI :8000</span>
+          )}
         </aside>
 
+        {/* P0.2: Visible backend error banner with explicit opt-in demo button */}
         {error && (
-          <div className="error" role="alert">
-            {error}
+          <div
+            className="error"
+            role="alert"
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: 12,
+            }}
+          >
+            <div>
+              <strong>Backend Error:</strong> {error}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" className="quick-fill-btn" onClick={loadRecordsFromBackend}>
+                ↻ Retry Backend (127.0.0.1:8000)
+              </button>
+              {!explicitDemoMode && (
+                <button type="button" className="quick-fill-btn" onClick={enableExplicitDemoMode}>
+                  Enable Explicit Demo Fixture Mode
+                </button>
+              )}
+            </div>
           </div>
         )}
 
         {/* ── Section 01: Canonical Preset & Question Launchpad ── */}
-        <section className="workspace">
+        <section id="section-investigations" className="workspace">
           <div className="workspace-heading">
             <div>
-              <span className="section-kicker">01 — CANONICAL INVESTIGATION LAUNCHPAD</span>
-              <h2>Select a preset hospitality inquiry</h2>
+              <span className="section-kicker">01 — INVESTIGATION SETUP</span>
+              <h2>Select a supported hospitality investigation scenario</h2>
             </div>
             <span className="record-count">
               PRESET_ID: <b>{PRESETS[selectedPresetIndex].preset_id}</b> · {records.length} RECORDS
@@ -809,36 +1249,38 @@ function App() {
           </div>
           <div className="investigation-row">
             <label className="select-wrap">
-              <span>CANONICAL PRESET (PRESET_ID)</span>
+              <span>SUPPORTED SCENARIO (PRESET_ID)</span>
               <select
                 value={selectedPresetIndex}
                 onChange={(e) => setSelectedPresetIndex(Number(e.target.value))}
               >
                 {PRESETS.map((item, i) => (
                   <option value={i} key={item.preset_id}>
-                    {item.label} [{item.preset_id}]
+                    {item.label} ({item.preset_id})
                   </option>
                 ))}
               </select>
             </label>
             <div className="question-preview">
-              <span>CANONICAL BACKEND QUESTION</span>
+              <span>CANONICAL QUESTION &amp; SCOPE</span>
               <p>{PRESETS[selectedPresetIndex].question}</p>
+              <small style={{ color: "#6e7770", fontSize: 11 }}>{PRESETS[selectedPresetIndex].description}</small>
             </div>
             <button className="primary" onClick={startInvestigation} disabled={busy}>
-              {busy ? "Evaluating…" : investigation ? "Re-run Investigation" : "Run Investigation"}
+              {busy ? "Evaluating…" : investigation ? "Re-run Investigation" : "Start Investigation"}
               <span>↗</span>
             </button>
           </div>
         </section>
 
-        {/* ── Section 01B: Challenge Snapshot Banner (Point #5) ── */}
+        {/* ── PDF Section 6: Before vs After Challenge Comparison ── */}
         {change && (
           <section className="change-card" role="status" aria-live="polite">
             <div className="change-mark">↻</div>
             <div style={{ flex: 1 }}>
               <span className="section-kicker">
-                CHALLENGE RECOMPUTATION SNAPSHOT · UPDATED REVISION v{String(change.version).padStart(2, "0")}
+                CHALLENGE &amp; REASSESSMENT COMPARISON · REVISION v{String(change.beforeVersion).padStart(2, "0")} → v
+                {String(change.afterVersion).padStart(2, "0")}
               </span>
               <h3>{HYPOTHESES[change.after.hypothesis_id] ?? change.after.hypothesis_id}</h3>
 
@@ -846,15 +1288,27 @@ function App() {
                 <div className="snapshot-box">
                   <span className="kpi-label">BEFORE CHALLENGE (REV v{change.before.version})</span>
                   <strong>
-                    {change.before.status} · {Math.round(change.before.confidence * 100)}% est.
+                    Status: {change.before.status} · {Math.round(change.before.confidence * 100)}% heuristic est.
                   </strong>
+                  {change.before.explanation_trace?.status_rule_id && (
+                    <small>
+                      Rules: <code>{change.before.explanation_trace.status_rule_id}</code> /{" "}
+                      <code>{change.before.explanation_trace.confidence_rule_id ?? "—"}</code>
+                    </small>
+                  )}
                   <small>{change.before.uncertainty}</small>
                 </div>
                 <div className="snapshot-box after">
                   <span className="kpi-label">AFTER CHALLENGE (REV v{change.after.version})</span>
                   <strong>
-                    {change.after.status} · {Math.round(change.after.confidence * 100)}% est.
+                    Status: {change.after.status} · {Math.round(change.after.confidence * 100)}% heuristic est.
                   </strong>
+                  {change.after.explanation_trace?.status_rule_id && (
+                    <small>
+                      Rules: <code>{change.after.explanation_trace.status_rule_id}</code> /{" "}
+                      <code>{change.after.explanation_trace.confidence_rule_id ?? "—"}</code>
+                    </small>
+                  )}
                   <small>{change.after.uncertainty}</small>
                 </div>
               </div>
@@ -864,8 +1318,20 @@ function App() {
                   text={`RECOMPUTED CLAIM IDS: ${change.recomputedIds.map((id) => HYPOTHESES[id] ?? id).join(", ")}`}
                   tone="green"
                 />
-                <TracePill text={`DISPUTED EVIDENCE ITEMS: ${change.disputedCount}`} tone="orange" />
-                <TracePill text={`CHALLENGE REASON: "${change.reason}"`} tone="muted" />
+                <TracePill
+                  text={`DISPUTED EVIDENCE: ${change.disputedIds.length > 0 ? change.disputedIds.join(", ") : "NONE"}`}
+                  tone="orange"
+                />
+                {change.before.explanation_trace?.status_rule_id !==
+                  change.after.explanation_trace?.status_rule_id && (
+                  <TracePill
+                    text={`STATUS RULE CHANGED: ${change.before.explanation_trace?.status_rule_id ?? "—"} → ${
+                      change.after.explanation_trace?.status_rule_id ?? "—"
+                    }`}
+                    tone="purple"
+                  />
+                )}
+                <TracePill text={`REASON: "${change.reason}"`} tone="muted" />
               </div>
             </div>
           </section>
@@ -876,13 +1342,14 @@ function App() {
             <section className="findings">
               <div className="workspace-heading">
                 <div>
-                  <span className="section-kicker">02 — HYPOTHESIS &amp; EVIDENCE MATRIX</span>
+                  <span className="section-kicker">02 — HYPOTHESIS RESULTS &amp; EVIDENCE EXPLORER</span>
                   <h2>Five candidate contributors</h2>
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <span className="version-pill">SUPPORTED: {statusCounts.supported}</span>
                   <span className="version-pill">PARTIAL: {statusCounts.partial}</span>
-                  <span className="version-pill">DISPUTED EVIDENCE: {statusCounts.disputed}</span>
+                  <span className="version-pill">CONTRADICTED: {statusCounts.contradicted}</span>
+                  <span className="version-pill">INSUFFICIENT: {statusCounts.insufficient}</span>
                   <span
                     className="version-pill"
                     style={{ background: "#e3ede7", color: "#285f4d", fontWeight: 600 }}
@@ -916,7 +1383,7 @@ function App() {
                             {HYPOTHESES[claim.hypothesis_id] ?? claim.hypothesis_id}
                           </span>
                           <span className={`status-text ${claim.status.toLowerCase()}`}>
-                            {claim.status} · {pct}% est. · v{claim.version}
+                            {claim.status} · {pct}% heuristic · v{claim.version}
                             {hasDisputed ? " · DISPUTED" : ""}
                           </span>
                           <div className="conf-meter-track" aria-hidden="true">
@@ -952,12 +1419,12 @@ function App() {
                     <p className="claim-summary">
                       {selected.summary}
                       <span>
-                        {Math.round(selected.confidence * 100)}% review estimate (deterministic engine assessment ·
-                        human verification required)
+                        {Math.round(selected.confidence * 100)}% fixed engine review heuristic (not a calibrated
+                        probability · human verification required)
                       </span>
                     </p>
 
-                    {/* ── Point #4: Backend Explanation Trace Inspector ── */}
+                    {/* ── PDF Section 5: Dedicated Explainability, Dispositions, Advisory Coverage & Source Independence ── */}
                     <div className="explanation-trace-box">
                       <div
                         style={{
@@ -969,71 +1436,227 @@ function App() {
                         }}
                       >
                         <span className="section-kicker" style={{ marginBottom: 0 }}>
-                          ENGINE EXPLANATION TRACE (STATUS &amp; CONFIDENCE RULES + DISPOSITIONS)
+                          EXPLAINABILITY &amp; DECISION RULES (explanation_trace)
                         </span>
-                        <TracePill text="DETERMINISTIC ENGINE AUTHORITY" tone="purple" />
+                        <TracePill text="ENGINE-OWNED VERIFICATION LOGIC" tone="purple" />
                       </div>
 
-                      {selected.explanation_trace ? (
-                        <>
-                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                            {selected.explanation_trace.status_rule_id && (
-                              <TracePill
-                                text={`STATUS RULE: ${selected.explanation_trace.status_rule_id}`}
-                                tone="green"
-                              />
-                            )}
-                            {selected.explanation_trace.confidence_rule_id && (
-                              <TracePill
-                                text={`CONFIDENCE RULE: ${selected.explanation_trace.confidence_rule_id}`}
-                                tone="muted"
-                              />
-                            )}
-                          </div>
+                      {/* 5A: Decision Rules */}
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                        <TracePill
+                          text={`STATUS RULE ID: ${
+                            selected.explanation_trace?.status_rule_id ?? `DERIVED_${selected.status}`
+                          }`}
+                          tone="green"
+                        />
+                        <TracePill
+                          text={`CONFIDENCE RULE ID: ${
+                            selected.explanation_trace?.confidence_rule_id ?? "FIXED_HEURISTIC_RULE"
+                          }`}
+                          tone="muted"
+                        />
+                        <TracePill
+                          text={`INDEPENDENT SOURCE GROUPS: ${
+                            selectedSourceGroups.length > 0 ? selectedSourceGroups.join(", ") : "NONE"
+                          }`}
+                          tone={selectedSourceGroups.length > 1 ? "green" : "muted"}
+                        />
+                      </div>
 
-                          {renderEvidenceDispositions(selected.explanation_trace.evidence_dispositions).length > 0 && (
-                            <div style={{ marginTop: 10 }}>
-                              <span className="kpi-label">EVIDENCE DISPOSITIONS</span>
-                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
-                                {renderEvidenceDispositions(selected.explanation_trace.evidence_dispositions).map(
-                                  (d) => (
+                      {/* 5D: Source Independence explanation */}
+                      <p style={{ margin: "8px 0 0", fontSize: 11, color: "#4f5a52", lineHeight: 1.5 }}>
+                        <b>Source Independence:</b>{" "}
+                        {selectedSourceGroups.length > 1
+                          ? `Corroborated across ${selectedSourceGroups.length} distinct source groups (${selectedSourceGroups.join(
+                              ", "
+                            )}), reducing single-channel reporting bias.`
+                          : selectedSourceGroups.length === 1
+                          ? `Evidence currently originates from a single source group (${selectedSourceGroups[0]}). Cross-group corroboration is recommended before final sign-off.`
+                          : "No verified source groups linked to this hypothesis."}
+                      </p>
+
+                      {/* 5B / P1.1: Evidence Dispositions (`codes: string[]`) */}
+                      {parsedDispositions.length > 0 && (
+                        <div style={{ marginTop: 12 }}>
+                          <span className="kpi-label">EVIDENCE DISPOSITIONS (codes: string[])</span>
+                          <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+                            {parsedDispositions.map((item) => (
+                              <div
+                                key={item.recordKey}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  flexWrap: "wrap",
+                                  gap: 6,
+                                  padding: "6px 8px",
+                                  background: "#fbfaf6",
+                                  border: "1px solid #e1e0d8",
+                                  borderRadius: 2,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    fontFamily: "ui-monospace,monospace",
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    color: "#27322f",
+                                    marginRight: 4,
+                                  }}
+                                >
+                                  {item.recordKey}:
+                                </span>
+                                {item.codes.length > 0 ? (
+                                  item.codes.map((code) => (
                                     <TracePill
-                                      key={d.key}
-                                      text={`${d.key} → ${d.value}`}
-                                      tone={d.value.includes("DISPUTED") || d.value.includes("EXCLUDED") ? "orange" : "green"}
+                                      key={`${item.recordKey}-${code}`}
+                                      text={code}
+                                      tone={
+                                        code.includes("DISPUTED") ||
+                                        code.includes("EXCLUDED") ||
+                                        code.includes("DOWNGRADED") ||
+                                        code.includes("UNVERIFIED")
+                                          ? "orange"
+                                          : "green"
+                                      }
                                     />
-                                  )
+                                  ))
+                                ) : (
+                                  <TracePill text="NO_CODES" tone="muted" />
+                                )}
+                                {item.note && (
+                                  <span style={{ fontSize: 10, color: "#69756b" }}>({item.note})</span>
                                 )}
                               </div>
-                            </div>
-                          )}
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
-                          {selected.explanation_trace.rules_triggered &&
-                            selected.explanation_trace.rules_triggered.length > 0 && (
-                              <ul style={{ margin: "8px 0 0 16px", padding: 0, fontSize: 11, color: "#4f5a52" }}>
-                                {selected.explanation_trace.rules_triggered.map((rule) => (
-                                  <li key={rule.rule_id} style={{ marginBottom: 3 }}>
-                                    <code>{rule.rule_id}</code>
-                                    {rule.description ? `: ${rule.description}` : ""}
-                                    {rule.weight !== undefined ? ` (weight: ${rule.weight})` : ""}
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-                        </>
-                      ) : (
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                          <TracePill text={`STATUS_RULE: DERIVED_${selected.status}`} tone="green" />
-                          <TracePill
-                            text={`EVIDENCE_COUNT: ${selected.evidence.length} (${
-                              selected.evidence.filter((e) => e.disputed).length
-                            } DISPUTED)`}
-                            tone="muted"
-                          />
+                      {/* 5C / P1.2: Structured Advisory Evidence Coverage */}
+                      {parsedCoverageCategories.length > 0 && (
+                        <div
+                          style={{
+                            marginTop: 12,
+                            padding: "10px 12px",
+                            background: "#fbfaf6",
+                            border: "1px solid #d8dacf",
+                            borderRadius: 2,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              flexWrap: "wrap",
+                              gap: 6,
+                              marginBottom: 8,
+                            }}
+                          >
+                            <span className="kpi-label">
+                              ADVISORY EVIDENCE COVERAGE (explanation_trace.advisory_coverage.categories)
+                            </span>
+                            <TracePill
+                              text="ADVISORY INFORMATION ONLY · NOT PROOF OR CONFIDENCE SCORE"
+                              tone="muted"
+                            />
+                          </div>
+                          <div style={{ display: "grid", gap: 8 }}>
+                            {parsedCoverageCategories.map((cat) => {
+                              const isCovered = cat.state === "COVERED";
+                              return (
+                                <div
+                                  key={cat.name}
+                                  style={{
+                                    padding: "8px 10px",
+                                    background: isCovered ? "#eef4f0" : "#f7efe9",
+                                    borderLeft: `3px solid ${isCovered ? "#285f4d" : "#b45c37"}`,
+                                    display: "grid",
+                                    gap: 5,
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      alignItems: "center",
+                                      flexWrap: "wrap",
+                                      gap: 8,
+                                    }}
+                                  >
+                                    <div>
+                                      <span
+                                        style={{
+                                          fontFamily: "ui-monospace,monospace",
+                                          fontSize: 10,
+                                          fontWeight: 700,
+                                          color: "#27322f",
+                                        }}
+                                      >
+                                        {cat.name}
+                                      </span>
+                                      {cat.details && (
+                                        <span style={{ fontSize: 10, color: "#57645b", marginLeft: 8 }}>
+                                          — {cat.details}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <TracePill text={cat.state} tone={isCovered ? "green" : "orange"} />
+                                  </div>
+
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      flexWrap: "wrap",
+                                      gap: 10,
+                                      fontSize: 9.5,
+                                      fontFamily: "ui-monospace,monospace",
+                                      color: "#57645b",
+                                    }}
+                                  >
+                                    <span>
+                                      Matching IDs: <b>{cat.matchingIds.length > 0 ? cat.matchingIds.join(", ") : "None"}</b>
+                                    </span>
+                                    <span>
+                                      Fresh Support IDs:{" "}
+                                      <b>{cat.freshSupportIds.length > 0 ? cat.freshSupportIds.join(", ") : "None"}</b>
+                                    </span>
+                                    <span>
+                                      Fresh Contradiction IDs:{" "}
+                                      <b>
+                                        {cat.freshContradictionIds.length > 0
+                                          ? cat.freshContradictionIds.join(", ")
+                                          : "None"}
+                                      </b>
+                                    </span>
+                                    <span>
+                                      Source Groups:{" "}
+                                      <b>
+                                        {cat.independentGroups.length > 0 ? cat.independentGroups.join(", ") : "None"}
+                                      </b>
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <small
+                            style={{
+                              display: "block",
+                              marginTop: 6,
+                              fontSize: 9.5,
+                              color: "#6e7770",
+                              fontFamily: "ui-monospace,monospace",
+                            }}
+                          >
+                            Advisory notice: Coverage tracks whether expected evidence categories are represented; it
+                            does not establish causal proof, formal sufficiency, or a calibrated probability.
+                          </small>
                         </div>
                       )}
                     </div>
 
+                    {/* 5E: Uncertainty & Missing Evidence */}
                     <div className="uncertainty">
                       <span>!</span>
                       <div>
@@ -1053,16 +1676,17 @@ function App() {
                       <div className="missing" key={item}>
                         <span>＋</span>
                         <p>
-                          <b>Evidence gap</b>
+                          <b>Evidence gap (additional evidence useful for review)</b>
                           <br />
                           {item}
                         </p>
                       </div>
                     ))}
 
+                    {/* ── PDF Section 4C: Evidence Explorer with Expandable Details ── */}
                     <div className="evidence-heading">
                       <div>
-                        <span className="section-kicker">SOURCE RECORDS &amp; REVIEW STATES</span>
+                        <span className="section-kicker">EVIDENCE EXPLORER (CLICK TO EXPAND RECORD DETAILS)</span>
                         <h4>
                           Evidence considered <span>{selected.evidence.length}</span>
                         </h4>
@@ -1075,41 +1699,85 @@ function App() {
                     )}
 
                     <div className="evidence-list">
-                      {selected.evidence.map((item, i) => (
-                        <div
-                          className={`evidence-card ${item.stale ? "is-stale" : ""} ${
-                            item.disputed ? "is-disputed" : ""
-                          }`}
-                          key={`${item.source_record_id}-${i}`}
-                        >
-                          <div className="evidence-meta">
-                            <span className="source-id">{item.source_record_id}</span>
-                            <span>{item.department}</span>
-                            {item.source_group && <span>GROUP: {item.source_group}</span>}
-                            <time>{new Date(item.timestamp).toLocaleString()}</time>
-                            <span
-                              className={`stance ${
-                                item.review_state === "UNVERIFIED" ? "unverified" : item.stance.toLowerCase()
-                              }`}
-                            >
-                              {item.review_state === "UNVERIFIED"
-                                ? `UNVERIFIED · PROPOSED ${item.proposed_stance ?? item.stance}`
-                                : item.stance}
-                            </span>
-                          </div>
-                          <blockquote>“{item.quote}”</blockquote>
-                          <p>{item.rationale}</p>
-                          {(item.stale || item.disputed || item.review_state === "UNVERIFIED") && (
-                            <div className="evidence-flags">
-                              {item.stale && <span>STALE SOURCE</span>}
-                              {item.disputed && <span>DISPUTED · CHALLENGED BY REVIEWER · RETAINED FOR AUDIT</span>}
-                              {item.review_state === "UNVERIFIED" && (
-                                <span>PHRASE-CUE GUARD · NOT COUNTED AS CLAIM EVIDENCE</span>
-                              )}
+                      {selected.evidence.map((item, i) => {
+                        const evKey = `${item.source_record_id}-${i}`;
+                        const isExpanded = expandedEvidenceKey === evKey;
+                        const fullRecord = records.find((r) => r.id === item.source_record_id);
+                        return (
+                          <div
+                            className={`evidence-card ${item.stale ? "is-stale" : ""} ${
+                              item.disputed ? "is-disputed" : ""
+                            }`}
+                            key={evKey}
+                          >
+                            <div className="evidence-meta">
+                              <span className="source-id">{item.source_record_id}</span>
+                              <span>DEPT: {item.department}</span>
+                              <span>GROUP: {item.source_group ?? fullRecord?.source_group ?? "standard"}</span>
+                              <span>{item.stale ? "STALE" : "FRESH"}</span>
+                              <time>{new Date(item.timestamp).toLocaleString()}</time>
+                              <span
+                                className={`stance ${
+                                  item.review_state === "UNVERIFIED" ? "unverified" : item.stance.toLowerCase()
+                                }`}
+                              >
+                                {item.review_state === "UNVERIFIED"
+                                  ? `UNVERIFIED · PROPOSED ${item.proposed_stance ?? item.stance}`
+                                  : `${item.stance} (${item.review_state ?? "ACCEPTED"})`}
+                              </span>
                             </div>
-                          )}
-                        </div>
-                      ))}
+                            <blockquote>“{item.quote}”</blockquote>
+                            <p>{item.rationale}</p>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                flexWrap: "wrap",
+                                gap: 8,
+                                marginTop: 8,
+                              }}
+                            >
+                              <div className="evidence-flags" style={{ marginTop: 0 }}>
+                                {item.stale && <span>STALE SOURCE</span>}
+                                {item.disputed && <span>DISPUTED · RETAINED FOR HUMAN REVIEW</span>}
+                                {item.review_state === "UNVERIFIED" && (
+                                  <span>PHRASE-CUE GUARD · NOT COUNTED AS CLAIM EVIDENCE</span>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                className="quick-fill-btn"
+                                style={{ padding: "4px 8px", fontSize: 9 }}
+                                onClick={() => setExpandedEvidenceKey((curr) => (curr === evKey ? null : evKey))}
+                              >
+                                {isExpanded ? "▲ Hide Full Source Record" : "▼ Inspect Full Source Record"}
+                              </button>
+                            </div>
+                            {isExpanded && (
+                              <div
+                                style={{
+                                  marginTop: 10,
+                                  padding: "10px 12px",
+                                  background: "#f1f0e8",
+                                  border: "1px solid #d8dacf",
+                                  borderRadius: 2,
+                                  fontSize: 11,
+                                  color: "#27322f",
+                                }}
+                              >
+                                <div style={{ fontFamily: "ui-monospace,monospace", fontSize: 9.5, color: "#57645b" }}>
+                                  ORIGINAL RECORD ID: {item.source_record_id} · TAGS:{" "}
+                                  {(fullRecord?.tags ?? []).join(", ") || "none"}
+                                </div>
+                                <p style={{ margin: "6px 0 0", lineHeight: 1.55 }}>
+                                  {fullRecord?.text ?? item.quote}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
 
                     <details className="challenge-box" open>
@@ -1127,7 +1795,7 @@ function App() {
                               return (
                                 r && (
                                   <option key={id} value={id}>
-                                    {id} · {r.department}
+                                    {id} · {r.department} ({r.source_group ?? "source"})
                                   </option>
                                 )
                               );
@@ -1179,12 +1847,12 @@ function App() {
                               }
                             }}
                           >
-                            ⚡ Auto-Fill Demo Challenge
+                            ⚡ Auto-Fill Challenge Input
                           </button>
                         </div>
                         <small>
-                          Only claims depending on this record are reevaluated. The challenge is stored in append-only
-                          history; source material is never erased.
+                          Only claims depending on this record are reevaluated. A valid challenge may update confidence
+                          or evidence disposition codes even if the overall status label remains unchanged.
                         </small>
                       </form>
                     </details>
@@ -1193,50 +1861,343 @@ function App() {
               </div>
             </section>
 
-            <section className="history-section">
+            {/* ── PDF Section 7 / P2.1: Interactive Read-Only Revision History & Snapshot Inspector ── */}
+            <section id="section-history" className="history-section">
               <div className="workspace-heading">
                 <div>
-                  <span className="section-kicker">03 — APPEND-ONLY AUDIT TRAIL</span>
-                  <h2>Investigation revision history &amp; before/after snapshots</h2>
+                  <span className="section-kicker">03 — INTERACTIVE REVISION HISTORY (CLICK REVISION TO INSPECT)</span>
+                  <h2>Investigation audit trail &amp; stored before/after snapshots</h2>
                 </div>
-                <span className="record-count">{history.length} RECORDED VERSIONS</span>
+                <span className="record-count">{history.length} RECORDED VERSIONS · READ-ONLY INSPECTOR</span>
               </div>
+
+              {inspectedHistoryEntry && (
+                <div
+                  role="region"
+                  aria-label={`Read-only snapshot inspector for revision ${inspectedHistoryEntry.version}`}
+                  style={{
+                    marginBottom: 18,
+                    padding: "14px 16px",
+                    background: "#fbfaf6",
+                    border: "1px solid #c5d9cc",
+                    borderLeft: "4px solid #285f4d",
+                    borderRadius: 2,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: 8,
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div>
+                      <span className="section-kicker" style={{ marginBottom: 2 }}>
+                        READ-ONLY STORED SNAPSHOT INSPECTOR · REVISION{" "}
+                        {String(inspectedHistoryEntry.version).padStart(2, "0")}
+                      </span>
+                      <b style={{ fontSize: 13 }}>
+                        Event: {inspectedHistoryEntry.event} ·{" "}
+                        {new Date(inspectedHistoryEntry.created_at).toLocaleString()}
+                      </b>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <TracePill text="READ-ONLY · NO BACKEND STATE MUTATION" tone="muted" />
+                      <button
+                        type="button"
+                        className="quick-fill-btn"
+                        style={{ padding: "5px 9px" }}
+                        onClick={() => setInspectedHistoryVersion(null)}
+                      >
+                        ✕ Close Inspector
+                      </button>
+                    </div>
+                  </div>
+
+                  {inspectedHistoryEntry.reason && (
+                    <p style={{ fontSize: 12, fontStyle: "italic", margin: "4px 0 10px", color: "#37443c" }}>
+                      Challenge reason: “{inspectedHistoryEntry.reason}”
+                    </p>
+                  )}
+
+                  {inspectedHistoryEntry.before && inspectedHistoryEntry.after ? (
+                    <div style={{ display: "grid", gap: 10 }}>
+                      {Object.keys(inspectedHistoryEntry.after).map((claimKey) => {
+                        const beforeClaim = inspectedHistoryEntry.before?.[claimKey];
+                        const afterClaim = inspectedHistoryEntry.after?.[claimKey];
+                        if (!afterClaim) return null;
+                        const statusChanged = beforeClaim && beforeClaim.status !== afterClaim.status;
+                        const confChanged =
+                          beforeClaim &&
+                          Math.round(beforeClaim.confidence * 100) !== Math.round(afterClaim.confidence * 100);
+                        return (
+                          <div key={claimKey} className="challenge-snapshot-grid">
+                            <div className="snapshot-box">
+                              <span className="kpi-label">
+                                STORED BEFORE ({HYPOTHESES[afterClaim.hypothesis_id] ?? claimKey})
+                              </span>
+                              {beforeClaim ? (
+                                <>
+                                  <strong>
+                                    {beforeClaim.status} · {Math.round(beforeClaim.confidence * 100)}% est. (v
+                                    {beforeClaim.version})
+                                  </strong>
+                                  {beforeClaim.explanation_trace?.status_rule_id && (
+                                    <small>
+                                      Rule: <code>{beforeClaim.explanation_trace.status_rule_id}</code>
+                                    </small>
+                                  )}
+                                  <small>{beforeClaim.uncertainty}</small>
+                                </>
+                              ) : (
+                                <small>No prior claim snapshot recorded.</small>
+                              )}
+                            </div>
+                            <div className="snapshot-box after">
+                              <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 4 }}>
+                                <span className="kpi-label">
+                                  STORED AFTER ({HYPOTHESES[afterClaim.hypothesis_id] ?? claimKey})
+                                </span>
+                                {(statusChanged || confChanged) && (
+                                  <TracePill
+                                    text={
+                                      statusChanged && confChanged
+                                        ? "STATUS & CONFIDENCE CHANGED"
+                                        : statusChanged
+                                        ? "STATUS CHANGED"
+                                        : "CONFIDENCE UPDATED"
+                                    }
+                                    tone="orange"
+                                  />
+                                )}
+                              </div>
+                              <strong>
+                                {afterClaim.status} · {Math.round(afterClaim.confidence * 100)}% est. (v
+                                {afterClaim.version})
+                              </strong>
+                              {afterClaim.explanation_trace?.status_rule_id && (
+                                <small>
+                                  Rule: <code>{afterClaim.explanation_trace.status_rule_id}</code>
+                                </small>
+                              )}
+                              <small>{afterClaim.uncertainty}</small>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p style={{ fontSize: 11, color: "#69756b", margin: 0 }}>
+                      Baseline initialization event (Revision 01). Recomputed claims:{" "}
+                      {inspectedHistoryEntry.recomputed_claim_ids.map((id) => HYPOTHESES[id] ?? id).join(", ") ||
+                        "Initial evaluation"}
+                      . Select a challenge revision to compare stored before/after claim snapshots.
+                    </p>
+                  )}
+                </div>
+              )}
+
               <ol className="timeline">
                 {history
                   .slice()
                   .reverse()
-                  .map((entry) => (
-                    <li key={entry.version}>
-                      <span className={`timeline-node ${entry.event.toLowerCase()}`} />
-                      <div className="timeline-entry">
-                        <div>
-                          <b>
-                            {entry.event === "CREATED"
-                              ? "Investigation initialized · 5 candidate hypotheses evaluated"
-                              : "Claim challenged · dependent claims atomically recomputed"}
-                          </b>
-                          <time>{new Date(entry.created_at).toLocaleString()}</time>
-                        </div>
-                        {entry.reason && <p>“{entry.reason}”</p>}
-                        {entry.recomputed_claim_ids.length > 0 && (
-                          <span>
-                            Recomputed claims:{" "}
-                            {entry.recomputed_claim_ids.map((id) => HYPOTHESES[id] ?? id).join(", ")}
-                          </span>
-                        )}
-                        {entry.before && entry.after && (
-                          <div style={{ marginTop: 6, fontSize: 10, fontFamily: "ui-monospace,monospace", color: "#496a58" }}>
-                            Snapshot recorded for {Object.keys(entry.after).length} claim(s)
+                  .map((entry) => {
+                    const isSelected = inspectedHistoryVersion === entry.version;
+                    return (
+                      <li key={entry.version}>
+                        <span className={`timeline-node ${entry.event.toLowerCase()}`} />
+                        <div
+                          className="timeline-entry"
+                          role="button"
+                          tabIndex={0}
+                          onClick={() =>
+                            setInspectedHistoryVersion((curr) => (curr === entry.version ? null : entry.version))
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setInspectedHistoryVersion((curr) => (curr === entry.version ? null : entry.version));
+                            }
+                          }}
+                          style={{
+                            cursor: "pointer",
+                            padding: "10px 12px",
+                            background: isSelected ? "#e8f0eb" : "#fbfaf6",
+                            border: `1px solid ${isSelected ? "#285f4d" : "#e1e0d8"}`,
+                            borderRadius: 2,
+                          }}
+                        >
+                          <div>
+                            <b>
+                              {entry.event === "CREATED"
+                                ? "Investigation initialized · 5 candidate hypotheses evaluated"
+                                : "Claim challenged · dependent claims atomically recomputed"}
+                            </b>
+                            <time>{new Date(entry.created_at).toLocaleString()}</time>
                           </div>
-                        )}
-                        <small>Revision {String(entry.version).padStart(2, "0")}</small>
-                      </div>
-                    </li>
-                  ))}
+                          {entry.reason && <p>“{entry.reason}”</p>}
+                          {entry.recomputed_claim_ids.length > 0 && (
+                            <span>
+                              Recomputed claims:{" "}
+                              {entry.recomputed_claim_ids.map((id) => HYPOTHESES[id] ?? id).join(", ")}
+                            </span>
+                          )}
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              marginTop: 6,
+                            }}
+                          >
+                            <small>Revision {String(entry.version).padStart(2, "0")}</small>
+                            <span
+                              style={{
+                                fontFamily: "ui-monospace,monospace",
+                                fontSize: 9,
+                                color: "#285f4d",
+                                fontWeight: 600,
+                              }}
+                            >
+                              {isSelected ? "▼ HIDE STORED SNAPSHOT" : "▶ INSPECT STORED SNAPSHOT (READ-ONLY)"}
+                            </span>
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
               </ol>
             </section>
           </>
         )}
+
+        {/* ── PDF Section 8: Searchable & Filterable Evidence Library ── */}
+        <section id="section-library" className="history-section">
+          <div className="workspace-heading">
+            <div>
+              <span className="section-kicker">04 — EVIDENCE LIBRARY (BACKEND SOURCE RECORDS)</span>
+              <h2>Searchable operational record corpus</h2>
+            </div>
+            <span className="record-count">
+              SHOWING {filteredLibraryRecords.length} OF {records.length} RECORDS
+            </span>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 180px 180px",
+              gap: 12,
+              background: "#eeede6",
+              border: "1px solid #e1e0d8",
+              padding: 14,
+              marginBottom: 14,
+            }}
+          >
+            <label className="select-wrap">
+              <span>SEARCH BY RECORD ID, TEXT, OR TAG</span>
+              <input
+                type="search"
+                value={libraryQuery}
+                onChange={(e) => setLibraryQuery(e.target.value)}
+                placeholder="Search e.g. REC-101, checklist, latency, handover…"
+                style={{
+                  font: "12px Arial, sans-serif",
+                  color: "var(--ink)",
+                  border: "1px solid #d6d8cf",
+                  background: "#fbfaf6",
+                  padding: "10px 11px",
+                  width: "100%",
+                  borderRadius: 2,
+                }}
+              />
+            </label>
+            <label className="select-wrap">
+              <span>FILTER BY DEPARTMENT</span>
+              <select value={libraryDeptFilter} onChange={(e) => setLibraryDeptFilter(e.target.value)}>
+                <option value="ALL">All Departments</option>
+                {availableDepartments.map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="select-wrap">
+              <span>FILTER BY SOURCE GROUP</span>
+              <select value={libraryGroupFilter} onChange={(e) => setLibraryGroupFilter(e.target.value)}>
+                <option value="ALL">All Source Groups</option>
+                {availableSourceGroups.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {filteredLibraryRecords.length === 0 ? (
+            <p className="empty">
+              {records.length === 0
+                ? "No records loaded from backend yet. Start the backend server at 127.0.0.1:8000 and click Retry."
+                : "No source records match the active search/filter criteria."}
+            </p>
+          ) : (
+            <div className="evidence-list">
+              {filteredLibraryRecords.map((rec) => {
+                const isExpanded = expandedRecordId === rec.id;
+                return (
+                  <div key={rec.id} className="evidence-card" style={{ background: "#fbfaf6" }}>
+                    <div className="evidence-meta">
+                      <span className="source-id" style={{ fontWeight: 700 }}>
+                        {rec.id}
+                      </span>
+                      <span>DEPT: {rec.department}</span>
+                      {rec.source_group && <span>SOURCE GROUP: {rec.source_group}</span>}
+                      <time>{new Date(rec.timestamp).toLocaleString()}</time>
+                    </div>
+                    <p style={{ fontSize: 13, color: "#27322f", margin: "8px 0", lineHeight: 1.55 }}>{rec.text}</p>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {(rec.tags ?? []).map((t) => (
+                          <TracePill key={t} text={`#${t}`} tone="muted" />
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        className="quick-fill-btn"
+                        style={{ padding: "4px 8px", fontSize: 9 }}
+                        onClick={() => setExpandedRecordId((curr) => (curr === rec.id ? null : rec.id))}
+                      >
+                        {isExpanded ? "▲ Hide Metadata" : "▼ Inspect Metadata"}
+                      </button>
+                    </div>
+                    {isExpanded && (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          padding: "8px 10px",
+                          background: "#f4f3ee",
+                          border: "1px solid #e1e0d8",
+                          fontFamily: "ui-monospace,monospace",
+                          fontSize: 10,
+                          color: "#4f5a52",
+                        }}
+                      >
+                        Record ID: {rec.id} · Department: {rec.department} · Source Group:{" "}
+                        {rec.source_group ?? "unassigned"} · Timestamp: {rec.timestamp} · Character Length:{" "}
+                        {rec.text.length}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
       </main>
 
       <footer>
