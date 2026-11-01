@@ -7,7 +7,10 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 5174,
     strictPort: true,
-    proxy: { "/api": "http://127.0.0.1:8000", "/demo-api": "http://127.0.0.1:8083" }
+    proxy: {
+      "/api": "http://127.0.0.1:8081",
+      "/demo-api": "http://127.0.0.1:8083",
+    },
   },
-  build: { outDir: "dist", emptyOutDir: true }
+  build: { outDir: "dist", emptyOutDir: true },
 });
