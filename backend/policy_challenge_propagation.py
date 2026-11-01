@@ -550,6 +550,19 @@ def plan_challenge_impact(
         }
     }
     blockers: dict[tuple[str, str | None], PlanBlocker] = {}
+    # Authoritative precedence table for outcome priority.
+    # Lower number = higher priority. A node's state can only be overwritten
+    # by a state with strictly lower priority number (i.e. higher priority).
+    # This table is the single definition used in both the transition loop and
+    # the post-traversal provenance check so they cannot conflict.
+    _STATE_PRIORITIES: dict[ImpactState, int] = {
+        ImpactState.DIRECTLY_CHALLENGED: 0,
+        ImpactState.REASSESSMENT_REQUIRED: 1,
+        ImpactState.BLOCKED_BY_MISSING_PROVENANCE: 2,
+        ImpactState.POTENTIALLY_AFFECTED: 3,
+        ImpactState.INCONCLUSIVE: 4,
+        ImpactState.UNCHANGED: 5,
+    }
     target_has_provenance = True
     if type(target) is Claim:
         target_has_provenance = any(
@@ -635,21 +648,17 @@ def plan_challenge_impact(
                 prior_modes = prior["modes"]
                 assert isinstance(prior_modes, set)
                 prior_modes.add(transition.mode)
-                priorities = {
-                    ImpactState.DIRECTLY_CHALLENGED: 0,
-                    ImpactState.REASSESSMENT_REQUIRED: 1,
-                    ImpactState.BLOCKED_BY_MISSING_PROVENANCE: 2,
-                    ImpactState.POTENTIALLY_AFFECTED: 3,
-                    ImpactState.INCONCLUSIVE: 4,
-                    ImpactState.UNCHANGED: 5,
-                }
-                if priorities[transition_state] < priorities[prior["state"]]:  # type: ignore[index]
+                if _STATE_PRIORITIES[transition_state] < _STATE_PRIORITIES[prior["state"]]:  # type: ignore[index]
                     prior["state"] = transition_state
             queue.append((transition.destination, next_path,
                           path_nodes | {transition.destination}, transition.mode))
 
         # A reached claim or condition without source passages cannot be treated
         # as grounded. Mark the impact as blocked unless it is the direct target.
+        # Uses the shared _STATE_PRIORITIES table to enforce the authoritative
+        # precedence: BLOCKED_BY_MISSING_PROVENANCE (priority 2) must not
+        # overwrite a state with higher priority (DIRECTLY_CHALLENGED=0 or
+        # REASSESSMENT_REQUIRED=1).
         requires_provenance = (
             type(current) is Claim
             or (type(current) is ApplicabilityCondition and current.scope_state != "UNKNOWN")
@@ -663,7 +672,12 @@ def plan_challenge_impact(
                     "This reached claim or condition has no graph-validated source passage edge.",
                 )
                 if current_id in impacts:
-                    impacts[current_id]["state"] = ImpactState.BLOCKED_BY_MISSING_PROVENANCE
+                    current_state = impacts[current_id]["state"]
+                    assert isinstance(current_state, ImpactState)
+                    # Only overwrite if BLOCKED_BY_MISSING_PROVENANCE has strictly
+                    # higher priority than the state already recorded.
+                    if _STATE_PRIORITIES[ImpactState.BLOCKED_BY_MISSING_PROVENANCE] < _STATE_PRIORITIES[current_state]:
+                        impacts[current_id]["state"] = ImpactState.BLOCKED_BY_MISSING_PROVENANCE
 
     complete = limit is None
     unexplored = () if complete else tuple(sorted(set(nodes) - examined))

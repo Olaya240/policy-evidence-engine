@@ -82,7 +82,10 @@ class Claim(BaseModel):
     id: str
     hypothesis_id: str
     status: Status
+    # Backward compatibility field: preserved temporarily for current clients.
     confidence: float = Field(ge=0, le=1)
+    evidence_strength: Optional[float] = Field(default=None, ge=0, le=1)
+    decision_confidence: Optional[float] = Field(default=None, ge=0, le=1)
     uncertainty: str
     summary: str
     evidence: list[Evidence]

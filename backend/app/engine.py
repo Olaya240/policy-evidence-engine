@@ -61,6 +61,15 @@ def validate_assessment(raw: dict, records: dict[str, Record]) -> Evidence:
 class _StatusDecision:
     status: Status
     confidence: float
+    # evidence_strength: heuristic measure of how strong and independent the
+    # directional evidence pool is, independent of which verdict is reached.
+    # Not a calibrated probability. Range: 0.0–1.0.
+    evidence_strength: float
+    # decision_confidence: heuristic confidence in the engine's resulting
+    # classification/status. Equal to the legacy `confidence` value so that
+    # the existing `confidence` field remains a documented compat alias.
+    # Not a calibrated probability. Range: 0.0–1.0.
+    decision_confidence: float
     uncertainty: str
     conflicts: list[str]
     missing: list[str]
@@ -76,6 +85,42 @@ class _StatusDecision:
     unverified: list[Evidence]
     independent_groups: list[dict]
     dependent_support_ids: list[str]
+
+
+def _compute_evidence_strength(
+    supports: list[Evidence],
+    contradicts: list[Evidence],
+    stale_support: list[Evidence],
+    stale_contradictions: list[Evidence],
+    independent_support: int,
+    diverse: bool,
+) -> float:
+    """Heuristic strength of the strongest directional evidence pool.
+
+    Measures how strong and independent the directional evidence is,
+    independent of which verdict (SUPPORTED/CONTRADICTED/PARTIAL) the
+    engine reaches.  Not a calibrated probability.
+
+    Semantics:
+      0.00 — no directional evidence at all
+      0.20 — stale-only directional evidence (historical context)
+      0.55 — exactly one fresh independent source in either direction
+      0.70 — two+ fresh contradicting sources (or single-direction contradiction)
+      0.75 — two+ fresh supporting groups, same or missing department
+      0.85 — two+ fresh supporting groups, diverse departments
+    """
+    if supports and independent_support >= 2:
+        return 0.85 if diverse else 0.75
+    elif supports:
+        return 0.55
+    elif contradicts and len(contradicts) > 1:
+        return 0.70
+    elif contradicts:
+        return 0.55
+    elif stale_support or stale_contradictions:
+        return 0.20
+    else:
+        return 0.0
 
 
 def _summarize_status_decision(evidence: list[Evidence]) -> _StatusDecision:
@@ -125,6 +170,19 @@ def _summarize_status_decision(evidence: list[Evidence]) -> _StatusDecision:
     dependent_support_ids = [item.source_record_id for item in supports if id(item) in dependent_support_objects]
     # Strong direct conflicts prevent SUPPORTED. Multiple independent fresh records
     # increase confidence but no fixed count alone establishes adequacy.
+    #
+    # Precedence (highest first):
+    #   1. FRESH_SUPPORT_AND_CONTRADICTION — both directions present
+    #   2. ACCEPTED_DISPUTED_EVIDENCE     — dispute pending
+    #   3. MULTI_GROUP_FRESH_SUPPORT      — ≥2 independent fresh groups (evaluated
+    #                                       BEFORE stale context so sufficient fresh
+    #                                       evidence cannot be pre-empted by stale noise)
+    #   4. FRESH_WITH_STALE_CONTEXT       — fresh directional + stale present
+    #                                       (fires when no strong fresh verdict above applied)
+    #   5. SINGLE_GROUP_FRESH_SUPPORT     — one fresh support group, no contradiction
+    #   6. FRESH_CONTRADICTION_ONLY       — only fresh contradiction
+    #   7. STALE_ONLY                     — no fresh directional, only stale
+    #   8. INSUFFICIENT                   — nothing useful
     if supports and contradicts:
         status, confidence = Status.PARTIAL, 0.52
         status_rule_id, confidence_rule_id = "STATUS.FRESH_SUPPORT_AND_CONTRADICTION", "CONFIDENCE.FIXED_0_52"
@@ -133,6 +191,13 @@ def _summarize_status_decision(evidence: list[Evidence]) -> _StatusDecision:
         status, confidence = Status.PARTIAL, 0.48
         status_rule_id, confidence_rule_id = "STATUS.ACCEPTED_DISPUTED_EVIDENCE", "CONFIDENCE.FIXED_0_48"
         uncertainty = "A user challenged one or more source records; the evidence remains visible pending human review."
+    elif supports and independent_support >= 2:
+        # Multi-group fresh support evaluated before stale-context check so that
+        # sufficient independent fresh evidence cannot be weakened by stale records.
+        status, confidence = Status.SUPPORTED, 0.78 if diverse else 0.68
+        status_rule_id = "STATUS.MULTI_GROUP_FRESH_SUPPORT"
+        confidence_rule_id = "CONFIDENCE.FIXED_0_78_DIVERSE_DEPARTMENTS" if diverse else "CONFIDENCE.FIXED_0_68_SAME_OR_MISSING_DEPARTMENT"
+        uncertainty = "Fresh, mutually consistent records support this hypothesis; check source independence and operational context."
     elif (supports or contradicts) and (stale_support or stale_contradictions):
         status, confidence = Status.PARTIAL, 0.54
         status_rule_id, confidence_rule_id = "STATUS.FRESH_WITH_STALE_CONTEXT", "CONFIDENCE.FIXED_0_54"
@@ -142,11 +207,6 @@ def _summarize_status_decision(evidence: list[Evidence]) -> _StatusDecision:
         if stale_contradictions:
             stale_direction.append("contradictory")
         uncertainty = "Fresh evidence is available, but stale " + " and ".join(stale_direction) + " records remain relevant historical context and are not treated as current proof or automatically false."
-    elif supports and independent_support >= 2:
-        status, confidence = Status.SUPPORTED, 0.78 if diverse else 0.68
-        status_rule_id = "STATUS.MULTI_GROUP_FRESH_SUPPORT"
-        confidence_rule_id = "CONFIDENCE.FIXED_0_78_DIVERSE_DEPARTMENTS" if diverse else "CONFIDENCE.FIXED_0_68_SAME_OR_MISSING_DEPARTMENT"
-        uncertainty = "Fresh, mutually consistent records support this hypothesis; check source independence and operational context."
     elif supports:
         status, confidence = Status.PARTIAL, 0.55
         status_rule_id, confidence_rule_id = "STATUS.SINGLE_GROUP_FRESH_SUPPORT", "CONFIDENCE.FIXED_0_55"
@@ -168,6 +228,9 @@ def _summarize_status_decision(evidence: list[Evidence]) -> _StatusDecision:
             uncertainty = "Only unverified proposals are available; they remain for human review and do not establish support or contradiction."
         else:
             uncertainty = "No admissible, relevant evidence establishes support or contradiction." if not evidence or neutrals else "Only stale or non-decisive evidence is available."
+    evidence_strength = _compute_evidence_strength(
+        supports, contradicts, stale_support, stale_contradictions, independent_support, diverse,
+    )
     missing = []
     if not supports and not contradicts:
         missing.append("A recent handover record that directly addresses this hypothesis.")
@@ -176,7 +239,10 @@ def _summarize_status_decision(evidence: list[Evidence]) -> _StatusDecision:
     if contradicts and not supports:
         missing.append("Evidence about the specific recurring missing-information incidents being investigated.")
     return _StatusDecision(
-        status=status, confidence=confidence, uncertainty=uncertainty,
+        status=status, confidence=confidence,
+        evidence_strength=evidence_strength,
+        decision_confidence=confidence,
+        uncertainty=uncertainty,
         conflicts=conflicts, missing=missing,
         status_rule_id=status_rule_id, confidence_rule_id=confidence_rule_id,
         supports=supports, contradicts=contradicts, neutrals=neutrals,
@@ -295,6 +361,32 @@ def _build_explanation_trace(
         "status_rule_id": decision.status_rule_id,
         "confidence_rule_id": decision.confidence_rule_id,
         "confidence_kind": "FIXED_ENGINE_HEURISTIC_NOT_CALIBRATED_PROBABILITY",
+        "confidence_fields": {
+            "evidence_strength": {
+                "value": decision.evidence_strength,
+                "semantics": (
+                    "Heuristic weight of the strongest directional evidence pool "
+                    "(independent groups, diversity, recency). Not a calibrated probability. "
+                    "Measures HOW STRONG the evidence is, independent of which verdict is reached."
+                ),
+                "derivation": "EVIDENCE_POOL_HEURISTIC",
+            },
+            "decision_confidence": {
+                "value": decision.decision_confidence,
+                "semantics": (
+                    "Heuristic confidence in the engine's resulting status classification. "
+                    "Equal to the legacy `confidence` field; preserved as explicit field with "
+                    "documented semantics. Not a calibrated probability. "
+                    "Measures HOW CONFIDENT the engine is IN ITS VERDICT, not evidence strength."
+                ),
+                "derivation": "STATUS_BRANCH_FIXED_HEURISTIC",
+            },
+            "confidence_compat_note": (
+                "The top-level `confidence` field is a backward-compatibility alias for "
+                "`decision_confidence`. Both fields carry the same value. Future clients "
+                "should prefer `evidence_strength` and `decision_confidence` for distinct semantics."
+            ),
+        },
         "evidence_disposition_semantics": {
             "COUNTED_SUPPORT": "Included in the fresh accepted support set; source-group counting remains separate.",
             "COUNTED_CONTRADICTION": "Included in the fresh accepted contradiction set.",
@@ -448,7 +540,10 @@ class AssessmentEngine:
                                          semantic_decisions, evaluation_times, generated_at,
                                          self.semantic_guard)
         return Claim(id=claim_id, hypothesis_id=hypothesis_id, status=status_decision.status,
-                     confidence=status_decision.confidence, uncertainty=status_decision.uncertainty,
+                     confidence=status_decision.confidence,
+                     evidence_strength=status_decision.evidence_strength,
+                     decision_confidence=status_decision.decision_confidence,
+                     uncertainty=status_decision.uncertainty,
                      summary=f"{status_decision.status.value.title()} evidence for {hypothesis_id.replace('_', ' ').lower()}.", evidence=evidence,
                      conflicts=status_decision.conflicts, missing_evidence=missing,
                      dependencies=sorted({e.source_record_id for e in evidence}), version=version,
@@ -550,6 +645,8 @@ class AssessmentEngine:
             semantic_decisions, evaluation_times, generated_at, self.semantic_guard,
         )
         raw.update(status=status_decision.status.value, confidence=status_decision.confidence,
+                   evidence_strength=status_decision.evidence_strength,
+                   decision_confidence=status_decision.decision_confidence,
                    uncertainty=status_decision.uncertainty, conflicts=status_decision.conflicts,
                    missing_evidence=missing,
                    summary=f"{status_decision.status.value.title()} evidence for {current['hypothesis_id'].replace('_', ' ').lower()}.",
