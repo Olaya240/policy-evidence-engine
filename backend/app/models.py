@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Stance(str, Enum):
@@ -38,6 +38,30 @@ HYPOTHESES = [
 ]
 
 
+class InvestigationPreset(str, Enum):
+    """Fixed user-facing question choices; clients cannot define hypotheses."""
+
+    HANDOVER_OMISSIONS = "handover_omissions"
+    CHECKLIST_ACCESS = "checklist_access"
+    DESK_COVERAGE = "desk_coverage"
+    PROPERTY_SYSTEM = "property_system"
+
+
+INVESTIGATION_PRESET_QUESTIONS = {
+    InvestigationPreset.HANDOVER_OMISSIONS: "Did time pressure contribute to recurring handover omissions?",
+    InvestigationPreset.CHECKLIST_ACCESS: "Did checklist availability contribute to missing handover information?",
+    InvestigationPreset.DESK_COVERAGE: "Did staffing constraints affect how guest requests were handed over?",
+    InvestigationPreset.PROPERTY_SYSTEM: "Did property system interruptions affect handover note completion?",
+}
+
+INVESTIGATION_PRESET_HYPOTHESES = {
+    InvestigationPreset.HANDOVER_OMISSIONS: "TIME_PRESSURE",
+    InvestigationPreset.CHECKLIST_ACCESS: "CHECKLIST_UNAVAILABLE",
+    InvestigationPreset.DESK_COVERAGE: "STAFFING_CONSTRAINTS",
+    InvestigationPreset.PROPERTY_SYSTEM: "PMS_SYSTEM_ISSUE",
+}
+
+
 class Evidence(BaseModel):
     source_record_id: str
     timestamp: datetime
@@ -66,10 +90,17 @@ class Claim(BaseModel):
     missing_evidence: list[str]
     dependencies: list[str]
     version: int
+    # Additive audit metadata; absent legacy snapshots serialize as unavailable.
+    explanation_trace: Optional[dict] = None
 
 
 class InvestigationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     question: str = Field(min_length=8, max_length=500)
+    # Optional to preserve existing question-only API callers. The frontend's
+    # supported presets always provide this server-validated selector.
+    preset_id: Optional[InvestigationPreset] = None
 
     @field_validator("question")
     @classmethod
@@ -105,6 +136,7 @@ class Record(BaseModel):
 class Investigation(BaseModel):
     id: str
     question: str
+    preset_id: Optional[InvestigationPreset] = None
     created_at: datetime
     version: int
     claims: list[Claim]

@@ -1,12 +1,14 @@
 """Deterministic evidence validation, status calculation, and dependency recomputation."""
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .mock_provider import MockProvider
 from .models import EvidenceReviewState, HYPOTHESES, Claim, Evidence, Record, Status, Stance
-from .provider_safety import (BoundedTransportProvider, LocalAssessmentProvider,
+from .evidence_coverage import advisory_missing_evidence, evidence_coverage
+from .provider_safety import (ApprovedProviderAdapter, LocalAssessmentProvider,
                               MandatoryProviderBoundary, ProviderSafetyError,
                               eligible_provider_records)
-from .semantic_guard import reviewed_relation
+from .semantic_guard import reviewed_relation_details
 
 STALE_DAYS = 90
 
@@ -25,7 +27,7 @@ class ProviderError(RuntimeError):
         super().__init__("Assessment provider failed or returned invalid output")
 
 
-def validate_assessment(raw: dict, records: dict[str, Record]) -> Evidence:
+def _validate_assessment_with_time(raw: dict, records: dict[str, Record]) -> tuple[Evidence, datetime]:
     record_id = raw.get("source_record_id")
     if not isinstance(record_id, str) or record_id not in records or records[record_id].restricted:
         raise AssessmentError("Assessment references an unknown or inadmissible source record", code="invalid_source")
@@ -40,18 +42,54 @@ def validate_assessment(raw: dict, records: dict[str, Record]) -> Evidence:
     rationale = raw.get("rationale")
     if not isinstance(rationale, str) or not rationale.strip():
         raise AssessmentError("Assessment rationale is required", code="invalid_rationale")
-    age = (datetime.now(timezone.utc) - record.timestamp).days
-    return Evidence(source_record_id=record_id, timestamp=record.timestamp, quote=quote, stance=stance, rationale=rationale.strip(), stale=age > STALE_DAYS, department=record.department, source_group=record.source_group or record.id)
+    evaluated_at = datetime.now(timezone.utc)
+    age = (evaluated_at - record.timestamp).days
+    evidence = Evidence(source_record_id=record_id, timestamp=record.timestamp, quote=quote, stance=stance,
+                        review_state=EvidenceReviewState.UNVERIFIED, rationale=rationale.strip(),
+                        stale=age > STALE_DAYS, department=record.department,
+                        source_group=record.source_group or record.id)
+    return evidence, evaluated_at
 
 
-def summarize_status(evidence: list[Evidence]) -> tuple[Status, float, str, list[str], list[str]]:
+def validate_assessment(raw: dict, records: dict[str, Record]) -> Evidence:
+    """Validate a proposal while retaining the established public return type."""
+    evidence, _evaluated_at = _validate_assessment_with_time(raw, records)
+    return evidence
+
+
+@dataclass
+class _StatusDecision:
+    status: Status
+    confidence: float
+    uncertainty: str
+    conflicts: list[str]
+    missing: list[str]
+    status_rule_id: str
+    confidence_rule_id: str
+    supports: list[Evidence]
+    contradicts: list[Evidence]
+    neutrals: list[Evidence]
+    stale_support: list[Evidence]
+    stale_contradictions: list[Evidence]
+    stale_accepted: list[Evidence]
+    disputed: list[Evidence]
+    unverified: list[Evidence]
+    independent_groups: list[dict]
+    dependent_support_ids: list[str]
+
+
+def _summarize_status_decision(evidence: list[Evidence]) -> _StatusDecision:
     fresh = [e for e in evidence if not e.stale]
     accepted = [e for e in fresh if e.review_state == EvidenceReviewState.ACCEPTED]
     supports = [e for e in accepted if e.stance == Stance.SUPPORTS and not e.disputed]
     contradicts = [e for e in accepted if e.stance == Stance.CONTRADICTS and not e.disputed]
     neutrals = [e for e in accepted if e.stance == Stance.NEUTRAL]
-    stale_support = [e for e in evidence if e.stale and e.stance == Stance.SUPPORTS]
-    stale_contradictions = [e for e in evidence if e.stale and e.stance == Stance.CONTRADICTS]
+    stale_accepted = [
+        e for e in evidence
+        if e.stale and e.review_state == EvidenceReviewState.ACCEPTED
+    ]
+    stale_support = [e for e in stale_accepted if e.stance == Stance.SUPPORTS]
+    stale_contradictions = [e for e in stale_accepted if e.stance == Stance.CONTRADICTS]
     disputed = [e for e in evidence if e.disputed]
     conflicts = []
     if disputed:
@@ -71,16 +109,33 @@ def summarize_status(evidence: list[Evidence]) -> tuple[Status, float, str, list
     independent_support = len({e.source_group or e.source_record_id for e in supports})
     departments_by_source = {e.source_group or e.source_record_id: e for e in supports}
     diverse = len({getattr(e, "department", None) for e in departments_by_source.values()}) > 1 if departments_by_source else False
+    group_members: dict[str, list[Evidence]] = {}
+    for item in supports:
+        group_members.setdefault(item.source_group or item.source_record_id, []).append(item)
+    independent_groups = [
+        {
+            "source_group_id": group_id,
+            "representative_source_record_id": members[-1].source_record_id,
+            "member_source_record_ids": [item.source_record_id for item in members],
+            "independent_support_count": 1,
+        }
+        for group_id, members in group_members.items()
+    ]
+    dependent_support_objects = {id(item) for members in group_members.values() for item in members[:-1]}
+    dependent_support_ids = [item.source_record_id for item in supports if id(item) in dependent_support_objects]
     # Strong direct conflicts prevent SUPPORTED. Multiple independent fresh records
     # increase confidence but no fixed count alone establishes adequacy.
     if supports and contradicts:
         status, confidence = Status.PARTIAL, 0.52
+        status_rule_id, confidence_rule_id = "STATUS.FRESH_SUPPORT_AND_CONTRADICTION", "CONFIDENCE.FIXED_0_52"
         uncertainty = "Fresh supporting and contradicting evidence remains unresolved; review both sources."
     elif any(e.review_state == EvidenceReviewState.ACCEPTED for e in disputed):
         status, confidence = Status.PARTIAL, 0.48
+        status_rule_id, confidence_rule_id = "STATUS.ACCEPTED_DISPUTED_EVIDENCE", "CONFIDENCE.FIXED_0_48"
         uncertainty = "A user challenged one or more source records; the evidence remains visible pending human review."
     elif (supports or contradicts) and (stale_support or stale_contradictions):
         status, confidence = Status.PARTIAL, 0.54
+        status_rule_id, confidence_rule_id = "STATUS.FRESH_WITH_STALE_CONTEXT", "CONFIDENCE.FIXED_0_54"
         stale_direction = []
         if stale_support:
             stale_direction.append("supporting")
@@ -89,18 +144,26 @@ def summarize_status(evidence: list[Evidence]) -> tuple[Status, float, str, list
         uncertainty = "Fresh evidence is available, but stale " + " and ".join(stale_direction) + " records remain relevant historical context and are not treated as current proof or automatically false."
     elif supports and independent_support >= 2:
         status, confidence = Status.SUPPORTED, 0.78 if diverse else 0.68
+        status_rule_id = "STATUS.MULTI_GROUP_FRESH_SUPPORT"
+        confidence_rule_id = "CONFIDENCE.FIXED_0_78_DIVERSE_DEPARTMENTS" if diverse else "CONFIDENCE.FIXED_0_68_SAME_OR_MISSING_DEPARTMENT"
         uncertainty = "Fresh, mutually consistent records support this hypothesis; check source independence and operational context."
     elif supports:
         status, confidence = Status.PARTIAL, 0.55
+        status_rule_id, confidence_rule_id = "STATUS.SINGLE_GROUP_FRESH_SUPPORT", "CONFIDENCE.FIXED_0_55"
         uncertainty = "A single fresh source is relevant but is not enough to establish the recurring cause."
     elif contradicts:
         status, confidence = Status.CONTRADICTED, 0.68 if len(contradicts) > 1 else 0.58
+        status_rule_id = "STATUS.FRESH_CONTRADICTION_ONLY"
+        confidence_rule_id = "CONFIDENCE.FIXED_0_68_MULTIPLE_CONTRADICTIONS" if len(contradicts) > 1 else "CONFIDENCE.FIXED_0_58_SINGLE_CONTRADICTION"
         uncertainty = "Fresh evidence conflicts with this hypothesis; this does not establish an alternative cause."
     elif stale_support or stale_contradictions:
         status, confidence = Status.INSUFFICIENT, 0.25
+        status_rule_id, confidence_rule_id = "STATUS.STALE_ONLY", "CONFIDENCE.FIXED_0_25"
         uncertainty = "Only stale evidence is available; it remains historical context and is not treated as current proof or automatically false."
     else:
-        status, confidence = Status.INSUFFICIENT, 0.2 if not evidence else 0.3
+        status, confidence = Status.INSUFFICIENT, 0.2 if not accepted else 0.3
+        status_rule_id = "STATUS.INSUFFICIENT_NO_DIRECTIONAL_EVIDENCE"
+        confidence_rule_id = "CONFIDENCE.FIXED_0_20_NO_ACCEPTED_FRESH_EVIDENCE" if not accepted else "CONFIDENCE.FIXED_0_30_ACCEPTED_NON_DIRECTIONAL_EVIDENCE"
         if unverified:
             uncertainty = "Only unverified proposals are available; they remain for human review and do not establish support or contradiction."
         else:
@@ -112,13 +175,168 @@ def summarize_status(evidence: list[Evidence]) -> tuple[Status, float, str, list
         missing.append("An independent, recent corroborating source or an operational check.")
     if contradicts and not supports:
         missing.append("Evidence about the specific recurring missing-information incidents being investigated.")
-    return status, confidence, uncertainty, conflicts, missing
+    return _StatusDecision(
+        status=status, confidence=confidence, uncertainty=uncertainty,
+        conflicts=conflicts, missing=missing,
+        status_rule_id=status_rule_id, confidence_rule_id=confidence_rule_id,
+        supports=supports, contradicts=contradicts, neutrals=neutrals,
+        stale_support=stale_support, stale_contradictions=stale_contradictions,
+        stale_accepted=stale_accepted,
+        disputed=disputed, unverified=unverified,
+        independent_groups=independent_groups,
+        dependent_support_ids=dependent_support_ids,
+    )
+
+
+def summarize_status(evidence: list[Evidence]) -> tuple[Status, float, str, list[str], list[str]]:
+    """Return the established public result from the shared decision path."""
+    decision = _summarize_status_decision(evidence)
+    return decision.status, decision.confidence, decision.uncertainty, decision.conflicts, decision.missing
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _evidence_dispositions(evidence: list[Evidence], decision: _StatusDecision) -> list[dict]:
+    support_ids = {id(item) for item in decision.supports}
+    contradiction_ids = {id(item) for item in decision.contradicts}
+    neutral_ids = {id(item) for item in decision.neutrals}
+    stale_directional_ids = {id(item) for item in (*decision.stale_support, *decision.stale_contradictions)}
+    stale_neutral_ids = {id(item) for item in decision.stale_accepted if item.stance == Stance.NEUTRAL}
+    # Recover dependent items by matching their source-group membership and the
+    # exact representative rule used by the status branch.
+    support_groups: dict[str, list[Evidence]] = {}
+    for item in decision.supports:
+        support_groups.setdefault(item.source_group or item.source_record_id, []).append(item)
+    dependent_ids = {id(item) for members in support_groups.values() for item in members[:-1]}
+    dispositions = []
+    for item in evidence:
+        codes = []
+        if id(item) in support_ids:
+            codes.append("COUNTED_SUPPORT")
+        if id(item) in contradiction_ids:
+            codes.append("COUNTED_CONTRADICTION")
+        if id(item) in neutral_ids:
+            codes.append("NEUTRAL_NOT_DIRECTIONAL")
+        if item.review_state == EvidenceReviewState.UNVERIFIED:
+            codes.append("UNVERIFIED_EXCLUDED")
+        if id(item) in stale_directional_ids:
+            codes.append("STALE_HISTORICAL_CONTEXT")
+        if id(item) in stale_neutral_ids:
+            codes.append("STALE_NON_DIRECTIONAL_CONTEXT")
+        if item.disputed:
+            codes.append("DISPUTED_REVIEW_REQUIRED")
+        if id(item) in dependent_ids and id(item) in support_ids:
+            codes.append("DEPENDENT_SOURCE_GROUP")
+        if not codes:
+            codes.append("UNCLASSIFIED_REVIEW_REQUIRED")
+        dispositions.append({"source_record_id": item.source_record_id, "codes": codes})
+    return dispositions
+
+
+def _advisory_coverage_trace(hypothesis_id: str, evidence: list[Evidence]) -> dict:
+    coverage = evidence_coverage(hypothesis_id, evidence)
+    return {
+        "advisory_only": True,
+        "formal_evidence_sufficiency": False,
+        "hypothesis_id": coverage["hypothesis_id"],
+        "categories": [
+            {
+                "category_id": category["category_id"],
+                "coverage_state": "COVERED" if category["covered_by_fresh_accepted"] else "NOT_COVERED",
+                "covered_by_fresh_accepted": category["covered_by_fresh_accepted"],
+                "matching_evidence_ids": [item["source_record_id"] for item in category["matching_evidence"]],
+                "fresh_accepted_support_ids": category["fresh_accepted_support_ids"],
+                "fresh_accepted_contradiction_ids": category["fresh_accepted_contradiction_ids"],
+                "neutral_evidence_ids": category["neutral_evidence_ids"],
+                "unclassified_evidence_ids": category["unclassified_evidence_ids"],
+                "independent_source_groups": category["independent_source_groups"],
+            }
+            for category in coverage["categories"]
+        ],
+    }
+
+
+def _build_explanation_trace(
+    hypothesis_id: str,
+    evidence: list[Evidence],
+    decision: _StatusDecision,
+    semantic_decisions: list[dict],
+    evidence_evaluation_times: list[datetime | None],
+    generated_at: datetime,
+    semantic_guard_enabled: bool,
+) -> dict:
+    """Observe the shared status decision without changing any engine outputs.
+
+    ``STATUS.*`` and ``CONFIDENCE.*`` values emitted by the ordered decision
+    branches are stable trace identifiers for rule set
+    ``story-connect-status-v1``. Semantic changes require a new
+    reasoning-rule version instead of reinterpreting persisted traces.
+    """
+    group_analysis = {
+        "independence_rule": "SOURCE_GROUP_OR_SOURCE_RECORD_ID_FALLBACK",
+        "independent_support_group_count": len(decision.independent_groups),
+        "independent_support_groups": decision.independent_groups,
+        "dependent_support_record_ids": decision.dependent_support_ids,
+        "dependent_support_records": [
+            {
+                "source_record_id": record_id,
+                "reason_code": "SAME_SOURCE_GROUP_AS_OTHER_SUPPORT",
+            }
+            for record_id in decision.dependent_support_ids
+        ],
+        "department_diversity_uses_last_support_record_per_group": True,
+    }
+    return {
+        "trace_schema_version": "1.0",
+        "reasoning_rule_version": "story-connect-status-v1",
+        "generated_at": _iso_utc(generated_at),
+        "status_rule_id": decision.status_rule_id,
+        "confidence_rule_id": decision.confidence_rule_id,
+        "confidence_kind": "FIXED_ENGINE_HEURISTIC_NOT_CALIBRATED_PROBABILITY",
+        "evidence_disposition_semantics": {
+            "COUNTED_SUPPORT": "Included in the fresh accepted support set; source-group counting remains separate.",
+            "COUNTED_CONTRADICTION": "Included in the fresh accepted contradiction set.",
+            "NEUTRAL_NOT_DIRECTIONAL": "Accepted fresh neutral evidence; it is not directional support or contradiction.",
+            "UNVERIFIED_EXCLUDED": "Excluded from directional support/contradiction sets but retained in review annotations and existing uncertainty text.",
+            "STALE_HISTORICAL_CONTEXT": "Accepted stale evidence supplied to the existing stale-context branches, not current directional proof.",
+            "STALE_NON_DIRECTIONAL_CONTEXT": "Accepted stale neutral evidence is non-directional and does not enter the stale support/contradiction sets.",
+            "DISPUTED_REVIEW_REQUIRED": "Disputed evidence is retained for review and follows the existing disputed-evidence branch rules.",
+            "DEPENDENT_SOURCE_GROUP": "Support record shares a group; it does not add an independent source-group unit.",
+            "UNCLASSIFIED_REVIEW_REQUIRED": "No directional, neutral, stale-accepted, disputed, or unverified disposition applied.",
+        },
+        "evidence_dispositions": _evidence_dispositions(evidence, decision),
+        "semantic_guard": {
+            "rule_set_version": "phrase-guard-v1",
+            "enabled": semantic_guard_enabled,
+            "decisions": semantic_decisions,
+        },
+        "source_group_analysis": group_analysis,
+        "staleness_policy": {
+            "policy_id": "STALE_AFTER_90_DAYS_UTC",
+            "threshold_days": STALE_DAYS,
+            "comparison": "AGE_DAYS_GREATER_THAN_THRESHOLD",
+            "timezone": "UTC",
+            "decision_evaluated_at": _iso_utc(generated_at),
+            "evidence_evaluation_times": [
+                {
+                    "source_record_id": item.source_record_id,
+                    "stale_value_used": item.stale,
+                    "evaluated_at": _iso_utc(evaluated_at) if evaluated_at is not None else None,
+                    "basis": "ASSESSMENT_VALIDATION" if evaluated_at is not None else "PRESERVED_STORED_STALE_FLAG",
+                }
+                for item, evaluated_at in zip(evidence, evidence_evaluation_times)
+            ],
+        },
+        "advisory_coverage": _advisory_coverage_trace(hypothesis_id, evidence),
+    }
 
 
 class AssessmentEngine:
     __slots__ = ("provider", "provider_boundary", "semantic_guard", "_sealed")
 
-    def __init__(self, provider: LocalAssessmentProvider | BoundedTransportProvider | None = None, *, semantic_guard: bool = True):
+    def __init__(self, provider: LocalAssessmentProvider | ApprovedProviderAdapter | None = None, *, semantic_guard: bool = True):
         selected_provider = MockProvider() if provider is None else provider
         object.__setattr__(self, "provider", selected_provider)
         object.__setattr__(self, "provider_boundary", MandatoryProviderBoundary(selected_provider))
@@ -158,12 +376,25 @@ class AssessmentEngine:
                 raise ProviderError("malformed_output") from None
         return proposals
 
-    def _review_item(self, item: Evidence, hypothesis_id: str) -> Evidence:
-        """Apply the same local review to ordinary and challenge-added proposals."""
+    def _review_item_with_trace(self, item: Evidence, hypothesis_id: str) -> tuple[Evidence, dict]:
+        """Apply local review and return bounded metadata from that same decision."""
         if not self.semantic_guard:
-            return item
+            # Preserve the intentionally unguarded baseline explicitly instead
+            # of relying on Evidence.review_state's model default.
+            item.review_state = EvidenceReviewState.ACCEPTED
+            return item, {
+                "source_record_id": item.source_record_id,
+                "review_state": item.review_state.value,
+                "proposed_stance": item.stance.value,
+                "semantic_relation": None,
+                "guard_enabled": False,
+                "cue_ids": [],
+                "reason_code": "GUARD_DISABLED_BY_ENGINE_CONFIGURATION",
+                "decision_source": "ASSESSMENT_REVIEW",
+            }
         item.proposed_stance = item.stance
-        relation = reviewed_relation(item.quote, hypothesis_id)
+        guard_decision = reviewed_relation_details(item.quote, hypothesis_id)
+        relation = guard_decision["relation"]
         item.semantic_relation = relation
         if relation == item.stance:
             item.review_state = EvidenceReviewState.ACCEPTED
@@ -174,7 +405,22 @@ class AssessmentEngine:
         else:
             item.review_state = EvidenceReviewState.UNVERIFIED
             item.rationale = "The proposal is retained for human review because phrase-level cues did not verify its direction."
-        return item
+        reason_code = ("CUE_MATCHES_PROPOSAL" if relation == item.stance else
+                       "CUE_MISMATCHES_PROPOSAL" if relation is not None else guard_decision["reason_code"])
+        return item, {
+            "source_record_id": item.source_record_id,
+            "review_state": item.review_state.value,
+            "proposed_stance": item.stance.value,
+            "semantic_relation": relation.value if relation is not None else None,
+            "guard_enabled": True,
+            "cue_ids": guard_decision["cue_ids"],
+            "reason_code": reason_code,
+            "decision_source": "ASSESSMENT_REVIEW",
+        }
+
+    def _review_item(self, item: Evidence, hypothesis_id: str) -> Evidence:
+        """Compatibility wrapper preserving the established method result."""
+        return self._review_item_with_trace(item, hypothesis_id)[0]
 
     def _claim(self, claim_id: str, hypothesis_id: str, records: list[Record], *, version: int = 1, extra: list[dict] | None = None) -> dict:
         indexed = {r.id: r for r in records if not r.restricted}
@@ -182,19 +428,31 @@ class AssessmentEngine:
         if extra:
             raw_items.extend(extra)
         evidence = []
+        semantic_decisions = []
+        evaluation_times = []
         seen = set()
         for raw in raw_items:
-            item = validate_assessment(raw, indexed)
+            item, evaluated_at = _validate_assessment_with_time(raw, indexed)
             # Never promote a proposal or flip it to the opposite stance.
-            self._review_item(item, hypothesis_id)
+            item, semantic_decision = self._review_item_with_trace(item, hypothesis_id)
             key = (item.source_record_id, item.quote, item.stance, item.review_state)
             if key not in seen:
                 seen.add(key)
                 evidence.append(item)
-        status, confidence, uncertainty, conflicts, missing = summarize_status(evidence)
-        return Claim(id=claim_id, hypothesis_id=hypothesis_id, status=status, confidence=confidence, uncertainty=uncertainty,
-                     summary=f"{status.value.title()} evidence for {hypothesis_id.replace('_', ' ').lower()}.", evidence=evidence,
-                     conflicts=conflicts, missing_evidence=missing, dependencies=sorted({e.source_record_id for e in evidence}), version=version).model_dump(mode="json")
+                semantic_decisions.append(semantic_decision)
+                evaluation_times.append(evaluated_at)
+        generated_at = evaluation_times[-1] if evaluation_times else datetime.now(timezone.utc)
+        status_decision = _summarize_status_decision(evidence)
+        missing = advisory_missing_evidence(hypothesis_id, evidence)
+        trace = _build_explanation_trace(hypothesis_id, evidence, status_decision,
+                                         semantic_decisions, evaluation_times, generated_at,
+                                         self.semantic_guard)
+        return Claim(id=claim_id, hypothesis_id=hypothesis_id, status=status_decision.status,
+                     confidence=status_decision.confidence, uncertainty=status_decision.uncertainty,
+                     summary=f"{status_decision.status.value.title()} evidence for {hypothesis_id.replace('_', ' ').lower()}.", evidence=evidence,
+                     conflicts=status_decision.conflicts, missing_evidence=missing,
+                     dependencies=sorted({e.source_record_id for e in evidence}), version=version,
+                     explanation_trace=trace).model_dump(mode="json")
 
     def investigate(self, records: list[Record]) -> list[dict]:
         return [self._claim(h.id, h.id, records) for h in HYPOTHESES]
@@ -214,18 +472,87 @@ class AssessmentEngine:
         # Challenge marks a claim dependency as disputed; it never rewrites its
         # quote, stance, source, or history. A human decides whether to resolve it.
         raw = current.copy()
-        raw["evidence"] = [dict(item, disputed=True) if item["source_record_id"] == record_id and quote in item["quote"] else item for item in current["evidence"]]
-        if not any(item.get("disputed") for item in raw["evidence"]):
+        matching_evidence = False
+        raw["evidence"] = []
+        for item in current["evidence"]:
+            matches_request = item["source_record_id"] == record_id and quote in item["quote"]
+            matching_evidence = matching_evidence or matches_request
+            raw["evidence"].append(dict(item, disputed=True) if matches_request else item)
+        if not matching_evidence:
             candidates = [a for a in self._provider_assess([record], current["hypothesis_id"]) if a["source_record_id"] == record_id and quote in a["quote"]]
             if not candidates:
                 raise AssessmentError("This source is not an assessed dependency for the selected claim")
-            evidence = validate_assessment(dict(candidates[0], quote=quote), {record.id: record})
-            self._review_item(evidence, current["hypothesis_id"])
+            evidence, new_evidence_evaluated_at = _validate_assessment_with_time(
+                dict(candidates[0], quote=quote), {record.id: record}
+            )
+            evidence, new_semantic_decision = self._review_item_with_trace(evidence, current["hypothesis_id"])
             evidence.disputed = True
             raw["evidence"].append(evidence.model_dump(mode="json"))
+        else:
+            new_evidence_evaluated_at = None
+            new_semantic_decision = None
+        if self.semantic_guard:
+            # Resolve legacy omission while the raw dictionary still records
+            # whether the field was absent. Explicit states are preserved.
+            for item in raw["evidence"]:
+                if "review_state" not in item:
+                    item["review_state"] = EvidenceReviewState.UNVERIFIED.value
         evidence_models = [Evidence.model_validate(item) for item in raw["evidence"]]
-        status, confidence, uncertainty, conflicts, missing = summarize_status(evidence_models)
-        raw.update(status=status.value, confidence=confidence, uncertainty=uncertainty, conflicts=conflicts, missing_evidence=missing,
-                   summary=f"{status.value.title()} evidence for {current['hypothesis_id'].replace('_', ' ').lower()}.",
-                   dependencies=sorted({e.source_record_id for e in evidence_models}), version=current["version"] + 1)
+        status_decision = _summarize_status_decision(evidence_models)
+        missing = advisory_missing_evidence(current["hypothesis_id"], evidence_models)
+        previous_trace = current.get("explanation_trace") or {}
+        previous_guard = previous_trace.get("semantic_guard", {})
+        previous_semantic_decisions = previous_guard.get("decisions", [])
+        semantic_decisions = []
+        previous_times = (previous_trace.get("staleness_policy", {})
+                          .get("evidence_evaluation_times", []))
+        evaluation_times: list[datetime | None] = []
+        for index, item in enumerate(evidence_models):
+            if index < len(previous_semantic_decisions):
+                prior = previous_semantic_decisions[index]
+                if prior.get("source_record_id") == item.source_record_id:
+                    semantic_decisions.append(dict(prior))
+                else:
+                    semantic_decisions.append({
+                        "source_record_id": item.source_record_id,
+                        "review_state": item.review_state.value,
+                        "proposed_stance": item.proposed_stance.value if item.proposed_stance else None,
+                        "semantic_relation": item.semantic_relation.value if item.semantic_relation else None,
+                        "guard_enabled": None,
+                        "cue_ids": [],
+                        "reason_code": "PRIOR_GUARD_DECISION_UNAVAILABLE",
+                        "decision_source": "PRESERVED_LEGACY_EVIDENCE",
+                    })
+            elif new_semantic_decision is not None and index == len(evidence_models) - 1:
+                semantic_decisions.append(new_semantic_decision)
+            else:
+                semantic_decisions.append({
+                    "source_record_id": item.source_record_id,
+                    "review_state": item.review_state.value,
+                    "proposed_stance": item.proposed_stance.value if item.proposed_stance else None,
+                    "semantic_relation": item.semantic_relation.value if item.semantic_relation else None,
+                    "guard_enabled": None,
+                    "cue_ids": [],
+                    "reason_code": "PRIOR_GUARD_DECISION_UNAVAILABLE",
+                    "decision_source": "PRESERVED_LEGACY_EVIDENCE",
+                })
+            timestamp_value = None
+            if index < len(previous_times):
+                previous = previous_times[index]
+                if previous.get("source_record_id") == item.source_record_id and previous.get("evaluated_at"):
+                    timestamp_value = datetime.fromisoformat(previous["evaluated_at"].replace("Z", "+00:00"))
+            if new_semantic_decision is not None and index == len(evidence_models) - 1:
+                timestamp_value = new_evidence_evaluated_at
+            evaluation_times.append(timestamp_value)
+        generated_at = datetime.now(timezone.utc)
+        trace = _build_explanation_trace(
+            current["hypothesis_id"], evidence_models, status_decision,
+            semantic_decisions, evaluation_times, generated_at, self.semantic_guard,
+        )
+        raw.update(status=status_decision.status.value, confidence=status_decision.confidence,
+                   uncertainty=status_decision.uncertainty, conflicts=status_decision.conflicts,
+                   missing_evidence=missing,
+                   summary=f"{status_decision.status.value.title()} evidence for {current['hypothesis_id'].replace('_', ' ').lower()}.",
+                   dependencies=sorted({e.source_record_id for e in evidence_models}),
+                   explanation_trace=trace, version=current["version"] + 1)
         return Claim.model_validate(raw).model_dump(mode="json")

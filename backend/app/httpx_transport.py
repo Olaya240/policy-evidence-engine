@@ -1,7 +1,7 @@
-"""Owned, bounded HTTPX transport for a future explicitly approved provider.
+"""Owned, bounded HTTPX transports for explicitly constructed providers.
 
-This module deliberately has no authentication support. A later key-loading
-design must add one fixed, single-request authentication mechanism.
+The generic placeholder transport is unauthenticated. The Baseten prototype
+accepts an explicitly injected key, but this module has no key-loading path.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ ASSESSMENT_PATH = "/v1/assess"
 # Reserved placeholder origin. A future reviewed integration must change this
 # trusted constant in a separate phase; callers cannot approve their own host.
 APPROVED_PROVIDER_ORIGIN = "https://provider.invalid"
+BASETEN_CHAT_COMPLETIONS_ENDPOINT = "https://inference.baseten.co/v1/chat/completions"
 _REQUEST_HEADERS = {
     "accept": "application/json",
     "accept-encoding": "identity",
@@ -144,7 +145,11 @@ class HttpxAsyncTransport:
         object.__setattr__(self, name, value)
 
     @staticmethod
-    async def _cleanup(response: httpx.Response | None, client: httpx.AsyncClient | None) -> None:
+    async def _cleanup(
+        response: httpx.Response | None,
+        client: httpx.AsyncClient | None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         if response is not None:
             try:
                 await response.aclose()
@@ -153,6 +158,13 @@ class HttpxAsyncTransport:
         if client is not None:
             try:
                 await client.aclose()
+            except Exception:
+                pass
+        elif transport is not None:
+            # AsyncClient owns the transport after successful construction. If
+            # client construction fails, close the still-unowned transport.
+            try:
+                await transport.aclose()
             except Exception:
                 pass
 
@@ -197,4 +209,121 @@ class HttpxAsyncTransport:
             raise ProviderSafetyError("timeout") from None
         except Exception:
             await self._cleanup(response, client)
+            raise ProviderSafetyError("provider_failure") from None
+
+
+class BasetenMuseSparkOpenTransport:
+    """Fixed-endpoint transport for the offline-reviewed Baseten prototype.
+
+    The key is an explicit constructor input, never loaded from the environment.
+    Normal application startup does not construct this transport, and the
+    associated provider call gate is disabled unless separately supplied.
+    """
+
+    __slots__ = ("_api_key", "_adapter", "_boundary", "_sealed")
+
+    def __init__(self, api_key: str):
+        if type(api_key) is not str or not api_key or api_key.strip() != api_key:
+            raise ProviderSafetyError("invalid_transport")
+        object.__setattr__(self, "_api_key", api_key)
+        object.__setattr__(self, "_adapter", None)
+        object.__setattr__(self, "_boundary", None)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("transport configuration is immutable")
+        object.__setattr__(self, name, value)
+
+    def __repr__(self) -> str:
+        return "BasetenMuseSparkOpenTransport(api_key=<redacted>)"
+
+    def _bind_adapter(self, adapter: object) -> None:
+        from .provider_safety import BasetenMuseSparkOpenAdapter
+        if type(adapter) is not BasetenMuseSparkOpenAdapter or self._adapter is not None:
+            raise ProviderSafetyError("unsupported_provider")
+        object.__setattr__(self, "_adapter", adapter)
+
+    def _bind_boundary(self, adapter: object, boundary: object) -> None:
+        from .provider_safety import BasetenMuseSparkOpenAdapter, MandatoryProviderBoundary
+        if (type(adapter) is not BasetenMuseSparkOpenAdapter or self._adapter is not adapter
+                or adapter._boundary is not None or type(boundary) is not MandatoryProviderBoundary
+                or boundary._provider is not adapter or self._boundary is not None):
+            raise ProviderSafetyError("mandatory_boundary_required")
+        object.__setattr__(self, "_boundary", boundary)
+
+    async def send(self, payload: bytes, *, timeout_seconds: float) -> StreamingResponse:
+        raise ProviderSafetyError("mandatory_boundary_required")
+
+    async def _send_from_adapter(self, payload: bytes, adapter: object, boundary: object,
+                                 *, timeout_seconds: float,
+                                 _authorization: object = None) -> StreamingResponse:
+        from .provider_safety import (
+            BasetenMuseSparkOpenAdapter,
+            MandatoryProviderBoundary,
+            _valid_transport_dispatch_authorization,
+        )
+        if (type(adapter) is not BasetenMuseSparkOpenAdapter or self._adapter is not adapter
+                or adapter._transport is not self or type(boundary) is not MandatoryProviderBoundary
+                or adapter._boundary is not boundary or self._boundary is not boundary
+                or boundary._provider is not adapter
+                or not _valid_transport_dispatch_authorization(
+                    _authorization, self, payload, timeout_seconds,
+                )):
+            raise ProviderSafetyError("mandatory_boundary_required")
+        return await self._send_http(
+            payload, timeout_seconds=timeout_seconds, _authorization=_authorization,
+        )
+
+    async def _send_http(self, payload: bytes, *, timeout_seconds: float,
+                         _authorization: object = None) -> StreamingResponse:
+        from .provider_safety import _consume_transport_dispatch_authorization
+        if not _consume_transport_dispatch_authorization(
+                _authorization, self, payload, timeout_seconds):
+            raise ProviderSafetyError("mandatory_boundary_required")
+        if type(payload) is not bytes:
+            raise ProviderSafetyError("invalid_request")
+        client: httpx.AsyncClient | None = None
+        response: httpx.Response | None = None
+        transport: httpx.AsyncBaseTransport | None = None
+        headers = {
+            "accept": "application/json",
+            "accept-encoding": "identity",
+            "content-type": "application/json",
+            "authorization": f"Bearer {self._api_key}",
+        }
+        try:
+            transport = httpx.AsyncHTTPTransport(retries=0, trust_env=False, verify=True)
+            client = httpx.AsyncClient(
+                transport=transport,
+                auth=None,
+                headers=headers,
+                cookies=httpx.Cookies(),
+                event_hooks={"request": [], "response": []},
+                follow_redirects=False,
+                trust_env=False,
+                timeout=httpx.Timeout(timeout_seconds),
+            )
+            request = client.build_request(
+                "POST", BASETEN_CHAT_COMPLETIONS_ENDPOINT, content=payload,
+                headers=headers, timeout=httpx.Timeout(timeout_seconds),
+            )
+            response = await client.send(request, stream=True, follow_redirects=False)
+            header_size = sum(len(name) + len(value) + 4 for name, value in response.headers.raw)
+            if len(response.headers.raw) > _MAX_RESPONSE_HEADER_COUNT or header_size > _MAX_RESPONSE_HEADER_BYTES:
+                raise ProviderSafetyError("response_headers_too_large")
+            if response.status_code < 200 or response.status_code >= 300:
+                raise ProviderSafetyError("provider_failure")
+            return _OwnedStreamingResponse(response, client)
+        except asyncio.CancelledError:
+            await HttpxAsyncTransport._cleanup(response, client, transport)
+            raise
+        except ProviderSafetyError:
+            await HttpxAsyncTransport._cleanup(response, client, transport)
+            raise
+        except httpx.TimeoutException:
+            await HttpxAsyncTransport._cleanup(response, client, transport)
+            raise ProviderSafetyError("timeout") from None
+        except Exception:
+            await HttpxAsyncTransport._cleanup(response, client, transport)
             raise ProviderSafetyError("provider_failure") from None

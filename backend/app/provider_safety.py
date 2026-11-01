@@ -20,6 +20,7 @@ MAX_CONFIGURABLE_ESTIMATED_BUDGET_USD = Decimal("5.00")
 # Process-local and shared by every supported bounded call. Fail fast rather
 # than blocking an event loop; this is separate from per-gate request quotas.
 _TRANSPORT_SINGLE_FLIGHT = Lock()
+_TRANSPORT_DISPATCH_SEAL = object()
 
 SYSTEM_INSTRUCTIONS = (
     "Assess only whether each supplied source quote supports, contradicts, or is neutral to the stated hypothesis. "
@@ -120,6 +121,23 @@ class StreamingResponse(Protocol):
 class StreamingTransport(Protocol):
     async def send(self, payload: bytes, *, timeout_seconds: float) -> StreamingResponse:
         """Send one request in streaming-response mode with a transport timeout."""
+
+
+class ApprovedProviderAdapter(Protocol):
+    """Typing contract for a reviewed provider adapter.
+
+    Structural conformance is not runtime authorization. The mandatory
+    boundary continues to admit only its exact, explicitly reviewed types.
+    New adapters must be added to that allowlist in a separate reviewed change.
+    """
+
+    def _bind_boundary(self, boundary: "MandatoryProviderBoundary") -> None:
+        """Bind this adapter to its one mandatory application boundary."""
+
+    def _assess_from_boundary(self, request: SerializedProviderRequest,
+                              boundary: "MandatoryProviderBoundary", *,
+                              timeout_seconds: float = MAX_REQUEST_TIMEOUT_SECONDS) -> Any:
+        """Consume only a sealed request and return internal proposal objects."""
 
 
 def _json_string_size(value: str) -> int:
@@ -324,8 +342,90 @@ class ProviderCallGate:
             object.__setattr__(self, "_reserved_estimated_cost", projected)
 
 
+class _TransportDispatchAuthorization:
+    """Per-call capability minted only after adapter validation and gate reservation.
+
+    This capability prevents accidental direct use of transport internals. It
+    is not a security boundary against arbitrary code running in this process.
+    """
+
+    __slots__ = ("_transport", "_adapter", "_boundary", "_payload", "_timeout_seconds",
+                 "_seal", "_consumed", "_consume_lock")
+
+    def __init__(self, transport: object, adapter: object, boundary: object, payload: bytes,
+                 timeout_seconds: float, *, _seal: object = None):
+        if _seal is not _TRANSPORT_DISPATCH_SEAL:
+            raise ProviderSafetyError("mandatory_boundary_required")
+        from .httpx_transport import BasetenMuseSparkOpenTransport
+
+        try:
+            valid_timeout = (not isinstance(timeout_seconds, bool)
+                             and isinstance(timeout_seconds, (int, float))
+                             and math.isfinite(timeout_seconds)
+                             and 0 < timeout_seconds <= MAX_REQUEST_TIMEOUT_SECONDS)
+        except (OverflowError, TypeError, ValueError):
+            valid_timeout = False
+        if (type(transport) is not BasetenMuseSparkOpenTransport
+                or type(adapter) is not BasetenMuseSparkOpenAdapter
+                or adapter._transport is not transport or adapter._boundary is not boundary
+                or type(boundary) is not MandatoryProviderBoundary
+                or boundary._provider is not adapter or type(adapter._gate) is not ProviderCallGate
+                or type(payload) is not bytes or len(payload) > MAX_REQUEST_BYTES
+                or not valid_timeout):
+            raise ProviderSafetyError("mandatory_boundary_required")
+        object.__setattr__(self, "_transport", transport)
+        object.__setattr__(self, "_adapter", adapter)
+        object.__setattr__(self, "_boundary", boundary)
+        object.__setattr__(self, "_payload", payload)
+        object.__setattr__(self, "_timeout_seconds", timeout_seconds)
+        object.__setattr__(self, "_seal", _TRANSPORT_DISPATCH_SEAL)
+        object.__setattr__(self, "_consumed", False)
+        object.__setattr__(self, "_consume_lock", Lock())
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("transport dispatch authorization is immutable")
+
+
+def _valid_transport_dispatch_authorization(
+    authorization: object, transport: object, payload: bytes,
+    timeout_seconds: float,
+) -> bool:
+    if (type(authorization) is not _TransportDispatchAuthorization
+            or authorization._seal is not _TRANSPORT_DISPATCH_SEAL
+            or authorization._consumed
+            or authorization._transport is not transport
+            or authorization._payload is not payload
+            or authorization._timeout_seconds != timeout_seconds):
+        return False
+    adapter = authorization._adapter
+    boundary = authorization._boundary
+    return (
+        type(adapter) is BasetenMuseSparkOpenAdapter
+        and adapter._transport is transport
+        and adapter._boundary is boundary
+        and type(boundary) is MandatoryProviderBoundary
+        and boundary._provider is adapter
+        and type(adapter._gate) is ProviderCallGate
+    )
+
+
+def _consume_transport_dispatch_authorization(
+    authorization: object, transport: object, payload: bytes,
+    timeout_seconds: float,
+) -> bool:
+    """Validate and consume one dispatch authorization atomically."""
+    if type(authorization) is not _TransportDispatchAuthorization:
+        return False
+    with authorization._consume_lock:
+        if not _valid_transport_dispatch_authorization(
+                authorization, transport, payload, timeout_seconds):
+            return False
+        object.__setattr__(authorization, "_consumed", True)
+        return True
+
+
 class BoundedTransportProvider:
-    """Future transport adapter that can only send sealed serialized requests."""
+    """Exact approved remote adapter; sends only sealed requests through bounded HTTPX."""
 
     __slots__ = ("_transport", "_gate", "_boundary", "_sealed")
 
@@ -434,12 +534,249 @@ class BoundedTransportProvider:
                 raise
             except Exception:
                 raise ProviderSafetyError("provider_failure") from None
+            return parse_provider_proposals(body, request)
+        finally:
+            _TRANSPORT_SINGLE_FLIGHT.release()
+
+
+class BasetenMuseSparkOpenAdapter:
+    """Explicitly approved, disabled-by-default Muse Spark Open prototype.
+
+    The exact Muse-specific response schema is not fully documented. This
+    adapter accepts only the narrow non-streaming text subset implemented
+    below; additional response fields or variants fail closed.
+    """
+
+    __slots__ = ("_transport", "_gate", "_boundary", "_sealed")
+
+    MODEL_SLUG = "meta-models/muse-spark-open"
+    _OUTPUT_INSTRUCTIONS = (
+        " Return only a JSON array. Each array item must have exactly these string fields: "
+        "source_record_id, quote, stance, rationale. stance must be SUPPORTS, CONTRADICTS, or NEUTRAL. "
+        "Use a source_record_id and exact quote from the supplied records. Do not include review state, "
+        "claim status, confidence, dependencies, or history. If no supported proposal exists, do not invent one."
+    )
+
+    def __init__(self, transport: object, gate: ProviderCallGate | None = None):
+        from .httpx_transport import BasetenMuseSparkOpenTransport
+        if type(self) is not BasetenMuseSparkOpenAdapter:
+            raise ProviderSafetyError("unsupported_provider")
+        if type(transport) is not BasetenMuseSparkOpenTransport:
+            raise ProviderSafetyError("unsupported_transport")
+        if gate is not None and type(gate) is not ProviderCallGate:
+            raise ProviderSafetyError("unsupported_gate")
+        object.__setattr__(self, "_transport", transport)
+        object.__setattr__(self, "_gate", ProviderCallGate() if gate is None else gate)
+        object.__setattr__(self, "_boundary", None)
+        object.__setattr__(self, "_sealed", True)
+        transport._bind_adapter(self)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("provider configuration is immutable")
+        object.__setattr__(self, name, value)
+
+    def __repr__(self) -> str:
+        return "BasetenMuseSparkOpenAdapter(transport=<redacted>)"
+
+    def _bind_boundary(self, boundary: "MandatoryProviderBoundary") -> None:
+        if type(boundary) is not MandatoryProviderBoundary or self._boundary is not None:
+            raise ProviderSafetyError("mandatory_boundary_required")
+        self._transport._bind_boundary(self, boundary)
+        object.__setattr__(self, "_boundary", boundary)
+
+    @staticmethod
+    def _wire_request(request: SerializedProviderRequest) -> bytes:
+        if not _is_serialized_request(request):
+            raise ProviderSafetyError("invalid_request")
+        if len(request) > MAX_REQUEST_BYTES:
+            raise ProviderSafetyError("request_too_large")
+        try:
+            envelope = json.loads(bytes(request).decode("utf-8", errors="strict"))
+            if (type(envelope) is not dict or set(envelope) != {"system_instructions", "input"}
+                    or type(envelope["input"]) is not dict
+                    or set(envelope["input"]) != {"hypothesis", "records"}):
+                raise ValueError
+            system_text = envelope["system_instructions"]
+            hypothesis = envelope["input"]["hypothesis"]
+            records = envelope["input"]["records"]
+            if (type(system_text) is not str or type(hypothesis) is not dict
+                    or set(hypothesis) != {"id", "label"}
+                    or type(hypothesis["id"]) is not str or type(hypothesis["label"]) is not str
+                    or type(records) is not list):
+                raise ValueError
+            for record in records:
+                if type(record) is not dict or set(record) != {"id", "text"}:
+                    raise ValueError
+                if type(record["id"]) is not str or type(record["text"]) is not str:
+                    raise ValueError
+            user_content = json.dumps(
+                {"hypothesis": hypothesis, "records": records},
+                ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+            )
+            wire_body = json.dumps(
+                {
+                    "model": BasetenMuseSparkOpenAdapter.MODEL_SLUG,
+                    "messages": [
+                        {"role": "developer", "content": system_text + BasetenMuseSparkOpenAdapter._OUTPUT_INSTRUCTIONS},
+                        {"role": "user", "content": user_content},
+                    ],
+                },
+                ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8", errors="strict")
+        except ProviderSafetyError:
+            raise
+        except (UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError, TypeError, ValueError):
+            raise ProviderSafetyError("invalid_request") from None
+        if len(wire_body) > MAX_REQUEST_BYTES:
+            raise ProviderSafetyError("request_too_large")
+        return wire_body
+
+    @staticmethod
+    def _reject_surrogate_text(value: Any) -> None:
+        if type(value) is str:
+            if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+                raise ProviderSafetyError("malformed_response")
+        elif type(value) is list:
+            for item in value:
+                BasetenMuseSparkOpenAdapter._reject_surrogate_text(item)
+        elif type(value) is dict:
+            for key, item in value.items():
+                BasetenMuseSparkOpenAdapter._reject_surrogate_text(key)
+                BasetenMuseSparkOpenAdapter._reject_surrogate_text(item)
+
+    @staticmethod
+    def _parse_response(body: bytes, request: SerializedProviderRequest) -> list[dict[str, str]]:
+        if type(body) is not bytes:
+            raise ProviderSafetyError("malformed_response")
+        try:
+            result = json.loads(
+                body.decode("utf-8", errors="strict"),
+                object_pairs_hook=_reject_duplicate_object_keys,
+                parse_constant=_reject_nonstandard_json_constant,
+            )
+            BasetenMuseSparkOpenAdapter._reject_surrogate_text(result)
+        except ProviderSafetyError:
+            raise
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            raise ProviderSafetyError("malformed_response") from None
+
+        allowed_top = {"id", "object", "created", "model", "choices", "usage"}
+        if (type(result) is not dict or not {"model", "choices"}.issubset(result)
+                or not set(result).issubset(allowed_top)):
+            raise ProviderSafetyError("unsupported_response")
+        if type(result["model"]) is not str or not result["model"]:
+            raise ProviderSafetyError("malformed_response")
+        if "id" in result and type(result["id"]) is not str:
+            raise ProviderSafetyError("malformed_response")
+        if "object" in result and result["object"] != "chat.completion":
+            raise ProviderSafetyError("unsupported_response")
+        if "created" in result and (isinstance(result["created"], bool) or type(result["created"]) is not int):
+            raise ProviderSafetyError("malformed_response")
+        if "usage" in result:
+            usage = result["usage"]
+            usage_keys = {"prompt_tokens", "completion_tokens", "total_tokens"}
+            if (type(usage) is not dict or not set(usage).issubset(usage_keys)
+                    or any(isinstance(value, bool) or type(value) is not int or value < 0
+                           for value in usage.values())):
+                raise ProviderSafetyError("unsupported_response")
+
+        choices = result["choices"]
+        if type(choices) is not list or len(choices) != 1 or type(choices[0]) is not dict:
+            raise ProviderSafetyError("unsupported_response")
+        choice = choices[0]
+        if set(choice) - {"index", "message", "finish_reason"} or not {"index", "message", "finish_reason"}.issubset(choice):
+            raise ProviderSafetyError("unsupported_response")
+        if isinstance(choice["index"], bool) or type(choice["index"]) is not int or choice["index"] != 0:
+            raise ProviderSafetyError("unsupported_response")
+        if type(choice["finish_reason"]) is not str or choice["finish_reason"] != "stop":
+            raise ProviderSafetyError("unsupported_response")
+        message = choice["message"]
+        if type(message) is not dict:
+            raise ProviderSafetyError("malformed_response")
+        if "refusal" in message:
+            refusal = message["refusal"]
+            if type(refusal) is str and refusal.strip():
+                raise ProviderSafetyError("provider_refusal")
+            raise ProviderSafetyError("unsupported_response")
+        if (set(message) != {"role", "content"} or message["role"] != "assistant"
+                or type(message["content"]) is not str or not message["content"].strip()):
+            raise ProviderSafetyError("unsupported_response")
+        try:
+            proposal_bytes = message["content"].encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            raise ProviderSafetyError("malformed_response") from None
+        proposals = parse_provider_proposals(proposal_bytes, request)
+        if not proposals:
+            raise ProviderSafetyError("empty_output")
+        return proposals
+
+    def _assess_from_boundary(self, request: SerializedProviderRequest,
+                              boundary: "MandatoryProviderBoundary", *,
+                              timeout_seconds: float = MAX_REQUEST_TIMEOUT_SECONDS) -> Any:
+        from .httpx_transport import BasetenMuseSparkOpenTransport
+        if (type(boundary) is not MandatoryProviderBoundary or self._boundary is not boundary
+                or boundary._provider is not self or type(self._transport) is not BasetenMuseSparkOpenTransport
+                or type(self._gate) is not ProviderCallGate):
+            raise ProviderSafetyError("mandatory_boundary_required")
+        wire_body = self._wire_request(request)
+        try:
+            valid_timeout = (not isinstance(timeout_seconds, bool)
+                             and isinstance(timeout_seconds, (int, float))
+                             and math.isfinite(timeout_seconds)
+                             and 0 < timeout_seconds <= MAX_REQUEST_TIMEOUT_SECONDS)
+        except (OverflowError, TypeError, ValueError):
+            valid_timeout = False
+        if not valid_timeout:
+            raise ProviderSafetyError("invalid_timeout")
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._assess_async(request, boundary, timeout_seconds=float(timeout_seconds)))
+        raise ProviderSafetyError("async_context_unsupported")
+
+    async def _assess_async(self, request: SerializedProviderRequest, boundary: "MandatoryProviderBoundary", *,
+                            timeout_seconds: float = MAX_REQUEST_TIMEOUT_SECONDS) -> Any:
+        from .httpx_transport import BasetenMuseSparkOpenTransport
+        if (type(boundary) is not MandatoryProviderBoundary or self._boundary is not boundary
+                or boundary._provider is not self or type(self._transport) is not BasetenMuseSparkOpenTransport
+                or type(self._gate) is not ProviderCallGate or not _is_serialized_request(request)):
+            raise ProviderSafetyError("mandatory_boundary_required")
+        wire_body = self._wire_request(request)
+        try:
+            valid_timeout = (not isinstance(timeout_seconds, bool)
+                             and isinstance(timeout_seconds, (int, float))
+                             and math.isfinite(timeout_seconds)
+                             and 0 < timeout_seconds <= MAX_REQUEST_TIMEOUT_SECONDS)
+        except (OverflowError, TypeError, ValueError):
+            valid_timeout = False
+        if not valid_timeout:
+            raise ProviderSafetyError("invalid_timeout")
+        if not _TRANSPORT_SINGLE_FLIGHT.acquire(blocking=False):
+            raise ProviderSafetyError("concurrent_request")
+        try:
+            self._gate.authorize_request()
+            authorization = _TransportDispatchAuthorization(
+                self._transport, self, boundary, wire_body, timeout_seconds,
+                _seal=_TRANSPORT_DISPATCH_SEAL,
+            )
+
+            async def exchange() -> bytes:
+                response = await self._transport._send_from_adapter(
+                    wire_body, self, boundary, timeout_seconds=timeout_seconds,
+                    _authorization=authorization,
+                )
+                return await _read_bounded_response(response)
+
             try:
-                result = json.loads(body.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                raise ProviderSafetyError("malformed_response") from None
-            _validate_provider_proposals(result, request)
-            return result
+                body = await asyncio.wait_for(exchange(), timeout=timeout_seconds)
+            except asyncio.TimeoutError:
+                raise ProviderSafetyError("timeout") from None
+            except ProviderSafetyError:
+                raise
+            except Exception:
+                raise ProviderSafetyError("provider_failure") from None
+            return self._parse_response(body, request)
         finally:
             _TRANSPORT_SINGLE_FLIGHT.release()
 
@@ -449,6 +786,43 @@ async def bounded_provider_call(provider: BoundedTransportProvider, request: Ser
     if type(provider) is not BoundedTransportProvider:
         raise ProviderSafetyError("unsupported_transport")
     raise ProviderSafetyError("mandatory_boundary_required")
+
+
+def _reject_duplicate_object_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProviderSafetyError("malformed_response")
+        result[key] = value
+    return result
+
+
+def _reject_nonstandard_json_constant(_value: str) -> None:
+    raise ProviderSafetyError("malformed_response")
+
+
+def parse_provider_proposals(body: bytes, request: SerializedProviderRequest) -> list[dict[str, str]]:
+    """Strictly parse the provider-neutral proposal JSON contract.
+
+    A documented vendor adapter must translate its wire response to this
+    internal shape before it can return proposals. This parser does not guess
+    vendor envelopes or treat refusal/error objects as empty proposals.
+    """
+    if type(body) is not bytes:
+        raise ProviderSafetyError("malformed_response")
+    try:
+        decoded = body.decode("utf-8", errors="strict")
+        result = json.loads(
+            decoded,
+            object_pairs_hook=_reject_duplicate_object_keys,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except ProviderSafetyError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        raise ProviderSafetyError("malformed_response") from None
+    _validate_provider_proposals(result, request)
+    return result
 
 
 def _validate_provider_proposals(proposals: Any, request: SerializedProviderRequest) -> None:
@@ -480,13 +854,13 @@ class MandatoryProviderBoundary:
 
     __slots__ = ("_provider", "_sealed")
 
-    def __init__(self, provider: LocalAssessmentProvider | BoundedTransportProvider):
+    def __init__(self, provider: LocalAssessmentProvider | ApprovedProviderAdapter):
         from .mock_provider import MockProvider
-        if type(provider) not in (MockProvider, BoundedTransportProvider):
+        if type(provider) not in (MockProvider, BoundedTransportProvider, BasetenMuseSparkOpenAdapter):
             raise ProviderSafetyError("unsupported_provider")
         object.__setattr__(self, "_provider", provider)
         object.__setattr__(self, "_sealed", True)
-        if type(provider) is BoundedTransportProvider:
+        if type(provider) in (BoundedTransportProvider, BasetenMuseSparkOpenAdapter):
             provider._bind_boundary(self)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -497,7 +871,7 @@ class MandatoryProviderBoundary:
     def assess(self, records: Sequence[Record], hypothesis_id: str) -> Any:
         eligible = eligible_provider_records(records)
         request = serialize_provider_request(eligible, hypothesis_id)
-        if type(self._provider) is BoundedTransportProvider:
+        if type(self._provider) in (BoundedTransportProvider, BasetenMuseSparkOpenAdapter):
             return self._provider._assess_from_boundary(request, self)
 
         # Project from the exact serializer output, not from the original caller
