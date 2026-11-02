@@ -8,9 +8,14 @@ neighbours that must stay *unrecognised*.
 
 That last distinction is the one the caller stands on: ``None`` means "no frame
 found, fall back to your own lexical reading", while ``Force.WITHHOLDS`` means
-"a matrix clause denied that the proposition was established". A module that
+"a matrix clause denied that the proposition was reported". A module that
 answered ``WITHHOLDS`` for silence would be safe-looking and wrong in the other
 direction, so ``None`` is asserted directly rather than by omission.
+
+One rule covers both verb classes: a negated frame withholds, whether the verb
+reports an establishment (``confirm``) or an utterance (``say``). The table used
+to certify denied speech acts; that was reversed on 2026-11-02, and the rows
+below marked ``REVERSED`` are the ones that moved.
 
 House rule, as in ``test_scope_layer.py``: every recognised construction is
 pinned next to a minimal neighbour that must not fire, so widening a lexicon or
@@ -44,16 +49,18 @@ from app.evidence_frames import (
 #
 # Evidential x speech act, each affirmative and negated. Negation arrives three
 # ways -- an auxiliary ("did not"), a ``no one`` / ``nobody`` subject, and
-# ``none of`` -- and the table must not care which.
+# ``none of`` -- and the table must not care which: every negated row withholds,
+# because denying a report denies that the proposition was put on the record.
 
 POLICY = [
     ("no-one-confirmed", "No one confirmed that the checklist was unavailable.",
      Force.WITHHOLDS),
     ("nobody-had-checked", "Nobody had checked whether the checklist was available.",
      Force.WITHHOLDS),
+    # REVERSED 2026-11-02: a denied report is an absence of evidence, not support.
     ("none-of-staff-reported",
      "None of the staff reported that the checklist was unavailable.",
-     Force.ASSERTS),
+     Force.WITHHOLDS),
     ("did-not-confirm", "The auditor did not confirm that the checklist was unavailable.",
      Force.WITHHOLDS),
     ("some-did-not-confirm",
@@ -68,13 +75,17 @@ POLICY = [
      Force.WITHHOLDS),
     ("several-confirmed", "Several staff confirmed that the binder was missing.",
      Force.ASSERTS),
-    ("no-one-said", "No one said the binder was missing.", Force.ASSERTS),  # CU-NO-ONE-SAID
+    # REVERSED 2026-11-02: CU-NO-ONE-SAID; nobody speaking is not evidence.
+    ("no-one-said", "No one said the binder was missing.", Force.WITHHOLDS),
+    # REVERSED 2026-11-02: SC-NO-ONE-REPORTED.
     ("no-one-reported", "No one reported that the colleague was absent.",
-     Force.ASSERTS),  # SC-NO-ONE-REPORTED
+     Force.WITHHOLDS),
+    # REVERSED 2026-11-02: CU-MATRIX-NEVER-CLAIMED.
     ("never-claimed", "We never claimed the checklist was available.",
-     Force.ASSERTS),  # CU-MATRIX-NEVER-CLAIMED
+     Force.WITHHOLDS),
+    # REVERSED 2026-11-02: CU-MATRIX-DID-NOT-SAY.
     ("did-not-say", "The auditor did not say the binder was at the desk.",
-     Force.ASSERTS),  # CU-MATRIX-DID-NOT-SAY
+     Force.WITHHOLDS),
 ]
 
 
@@ -96,7 +107,7 @@ GRID = [
                               for quantifier, polarity, class_ in GRID])
 def test_the_force_function_is_total_over_class_and_polarity(
         quantifier, polarity, verb_class):
-    """Exhaustive over the typed grid: only a denied evidential frame withholds.
+    """Exhaustive over the typed grid: every denied frame withholds, either class.
 
     ``assertion_force`` is total -- every recognised frame gets a force -- so
     the only way an unknown verb can fail to certify is never becoming an
@@ -109,7 +120,7 @@ def test_the_force_function_is_total_over_class_and_polarity(
         polarity=polarity,
         verb_class=verb_class,
     )
-    withholds = polarity == POLARITY_NEGATED and verb_class == EVIDENTIAL
+    withholds = polarity == POLARITY_NEGATED
     assert assertion_force(attribution) is (
         Force.WITHHOLDS if withholds else Force.ASSERTS)
 
@@ -223,15 +234,21 @@ def test_a_denial_in_a_separate_sentence_does_not_reach_a_later_frame():
 
     The first version scanned negation over the whole prefix while the agent was
     clause-scoped, so ``No one said …`` in sentence one marked an affirmative
-    evidential frame in sentence two as negated, and the whole prefix withheld a
-    proposition the second sentence asserts. Polarity is now read in the verb's
-    own clause, on sentence boundaries.
+    evidential frame in sentence two as negated. Polarity is now read in the
+    verb's own clause, on sentence boundaries: the second frame stays
+affirmative and asserts on its own. The composed force withholds because
+    sentence one is now a denied report in its own right, not because the denial
+    leaked -- which is why the per-frame forces are asserted as well as the
+    composition.
     """
     prefix = ("No one said the binder was missing. "
               "The auditor documented that the checklist was unavailable.")
-    assert [frame.polarity for frame in frames(prefix)] == [
+    found = frames(prefix)
+    assert [frame.polarity for frame in found] == [
         POLARITY_NEGATED, POLARITY_AFFIRMATIVE]
-    assert force_of_prefix(prefix) is Force.ASSERTS
+    assert [assertion_force(frame) for frame in found] == [
+        Force.WITHHOLDS, Force.ASSERTS]
+    assert force_of_prefix(prefix) is Force.WITHHOLDS
 
 
 def test_a_fronted_adverbial_does_not_break_the_clause_scope():
@@ -283,28 +300,36 @@ def test_repeated_calls_on_the_same_prefix_are_equal():
 # --- the two lexicons are not interchangeable ---------------------------------
 
 
-def test_the_evidential_and_speech_act_classes_are_not_interchangeable():
-    """If the module swapped its two verb sets, every assertion here flips.
+def test_the_two_classes_stay_labelled_and_share_the_negation_rule():
+    """The classes are still distinguishable, but they no longer disagree on force.
 
-    The classes differ only in what a denominator does to the complement, so the
-    discriminator has to be a denied frame of each class side by side: the
-    evidential denial withholds, the speech-act denials assert. An implementation
-    that lumped the verbs together into one class, or swapped the sets, would
-    return the same force for all three rows.
-
-    Verified by copying the module, swapping ``_VERB_CLASS``'s two sources, and
-    running this file against the copy: this test (and only its own neighbours)
-    fails there.
+    Before 2026-11-02 this test was a discriminator: a denied speech act asserted
+    while a denied evidential frame withheld, so swapping ``_VERB_CLASS``'s two
+    sources flipped three assertions. Now both classes withhold, and what the
+    label buys is the audit trail (``describe()``) plus the guard's reason
+    strings -- not a different verdict. A class that stopped being recognised
+    would still fail here, and so would one that stopped appearing in the frame.
     """
     assert verb_class_of("confirmed") == EVIDENTIAL
     assert verb_class_of("reported") == SPEECH_ACT
 
-    assert force_of_prefix(
-        "The auditor did not confirm that the checklist was unavailable."
-    ) is Force.WITHHOLDS
-    assert force_of_prefix(
-        "The auditor did not say that the checklist was unavailable."
-    ) is Force.ASSERTS
-    assert force_of_prefix(
-        "The auditor did not report that the checklist was unavailable."
-    ) is Force.ASSERTS
+    evidential = frames(
+        "The auditor did not confirm that the checklist was unavailable.")[0]
+    speech_act = frames(
+        "The auditor did not report that the checklist was unavailable.")[0]
+    assert (evidential.verb_class, speech_act.verb_class) == (
+        EVIDENTIAL, SPEECH_ACT)
+    assert evidential.describe() != speech_act.describe()
+
+    for denial in (
+        "The auditor did not confirm that the checklist was unavailable.",
+        "The auditor did not say that the checklist was unavailable.",
+        "The auditor did not report that the checklist was unavailable.",
+    ):
+        assert force_of_prefix(denial) is Force.WITHHOLDS, denial
+    for affirmation in (
+        "The auditor confirmed that the checklist was unavailable.",
+        "The auditor said that the checklist was unavailable.",
+        "The auditor reported that the checklist was unavailable.",
+    ):
+        assert force_of_prefix(affirmation) is Force.ASSERTS, affirmation

@@ -217,3 +217,115 @@ def test_certified_row_cites_an_opposite_stance_cue_without_marking_it_rejected(
     assert any(certified not in cue_id for cue_id in row["cue_ids"]), (
         "the row cites a cue from the stance it did not certify"
     )
+
+
+# --- a parenthetical inside the cue phrase -----------------------------------
+#
+# Cue words were joined with ``\s+``, so punctuation ended the phrase: "The
+# checklist, as it happens, was unavailable." reported ``NO_CUE_MATCH`` while the
+# same sentence with a newline matched. ``NO_CUE_MATCH`` means "the quote says
+# nothing about this hypothesis"; these sentences assert the cue directly, so the
+# reason code was false and the quote was dropped from the review in silence. The
+# matcher now allows a delimited aside between two cue words, with the neighbours
+# pinned: every cue word is still required, in order, and a joined match is
+# discarded when the aside is really a clause about a cue.
+
+_CUE = "CHECKLIST_UNAVAILABLE.SUPPORTS.checklist_was_unavailable"
+
+
+def test_a_parenthetical_inside_the_cue_phrase_does_not_break_the_match():
+    cases = [
+        "The checklist, as it happens, was unavailable.",
+        "The checklist (as it happens) was unavailable.",
+        "The checklist [as it happens] was unavailable.",
+        "The checklist \u2014 as it happens \u2014 was unavailable.",
+        "The checklist - as it happens - was unavailable.",
+        "The checklist\nwas unavailable.",
+    ]
+    for quote in cases:
+        detail = reviewed_relation_details(quote, "CHECKLIST_UNAVAILABLE")
+        assert detail["cue_ids"] == [_CUE], quote
+        assert detail["relation"] == Stance.SUPPORTS, (quote, detail)
+        assert detail["reason_code"] is None, (quote, detail)
+
+
+def test_the_aside_cannot_be_the_cue():
+    """Only an aside *between* cue words is allowed, never in place of one."""
+    for quote in [
+        "The checklist, as it happens.",
+        "The checklist, as it happens, was checked.",
+        "The checklist, as it happens, was fine.",
+    ]:
+        detail = reviewed_relation_details(quote, "CHECKLIST_UNAVAILABLE")
+        assert detail["cue_ids"] == [], (quote, detail)
+        assert detail["relation"] is None, (quote, detail)
+        assert detail["reason_code"] == "NO_CUE_MATCH", (quote, detail)
+
+
+def test_a_negation_inside_the_aside_does_not_negate_the_cue():
+    """The aside is a comment on the claim, not part of its negation scope."""
+    detail = reviewed_relation_details(
+        "The checklist, as one might not expect, was unavailable.",
+        "CHECKLIST_UNAVAILABLE",
+    )
+    assert detail["cue_ids"] == [_CUE]
+    assert detail["relation"] == Stance.SUPPORTS, detail
+    assert detail["reason_code"] is None, detail
+
+
+def test_a_negation_outside_the_aside_still_abstains():
+    """Neighbours of the aside rule: tolerating punctuation must not license
+    skipping a negation, which sits here between two cue words but outside any
+    aside. The cue's own wording does not occur, so nothing is certified either
+    way and the sentence abstains rather than being read as a double negative."""
+    detail = reviewed_relation_details(
+        "The checklist, as one might expect, was not unavailable.",
+        "CHECKLIST_UNAVAILABLE",
+    )
+    assert detail["relation"] is None, detail
+    assert detail["reason_code"] == "NO_CUE_MATCH", detail
+
+
+def test_a_cue_is_not_matched_across_an_aside_that_carries_another_cue():
+    """A comma clause about a cue is a clause boundary, not a parenthetical.
+
+    Joining the phrase across it would type the sentence from half of it — the
+    clause-level readers (``_cue_prefix_clause``, ``_is_hedged``) split on the
+    comma, so they would see the aside as the cue's own context.
+    """
+    joined = reviewed_relation_details(
+        "The checklist, as the binder was missing, was unavailable.",
+        "CHECKLIST_UNAVAILABLE",
+    )
+    assert _CUE not in joined["cue_ids"], joined
+    assert joined["cue_ids"] == ["CHECKLIST_UNAVAILABLE.SUPPORTS.binder_was_missing"], joined
+
+    # The same shape with the aside's cue negated: the aside still claims
+    # something about the cue, so the phrase is not joined across it and the
+    # negated clause is not a cue — the sentence is not read at all.
+    negated = reviewed_relation_details(
+        "The checklist, the binder was not missing, was unavailable.",
+        "CHECKLIST_UNAVAILABLE",
+    )
+    assert negated["cue_ids"] == [], negated
+    assert negated["reason_code"] == "NO_CUE_MATCH", negated
+
+
+def test_the_guard_reads_verb_classes_from_the_frame_module():
+    """One list, in ``app/evidence_frames.py``, for both modules.
+
+    The guard used to carry ``_EVIDENTIAL_VERB`` and ``_REPORTING_VERB``, its own
+    second copies of subsets of the frame lexicons (``_EVIDENTIAL_VERB`` had
+    already fallen behind ``EVIDENTIAL_VERBS``: no ``check``, no ``substantiate``).
+    These assertions fail if either list is reintroduced, and if a verb the frame
+    module calls evidential stops withholding the cue.
+    """
+    from app import evidence_frames, semantic_guard
+
+    assert not hasattr(semantic_guard, "_EVIDENTIAL_VERB")
+    assert not hasattr(semantic_guard, "_REPORTING_VERB")
+    for verb in sorted(evidence_frames.EVIDENTIAL_VERBS):
+        quote = f"The team did not {verb} the checklist was unavailable."
+        detail = reviewed_relation_details(quote, "CHECKLIST_UNAVAILABLE")
+        assert detail["cue_ids"] == [_CUE], (verb, detail)
+        assert detail["relation"] is None, (verb, detail)

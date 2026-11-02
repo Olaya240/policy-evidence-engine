@@ -50,7 +50,10 @@ def test_a_negated_premise_clause_abstains(sentence, hypothesis_id,
     detail = reviewed_relation_details(sentence, hypothesis_id)
     assert detail["relation"] is None, detail
     assert detail["relation"] is not Stance(unnegated_stance)
-    assert detail["reason_code"] == "NEGATED_CUE", detail
+    # The mechanism depends on what explains the negation: a matrix frame reports
+    # ATTRIBUTED_DENIAL, a negation inside the cue's own clause reports NEGATED_CUE.
+    # Both withhold; pinning one string here would hide which one fired.
+    assert detail["reason_code"] in {"NEGATED_CUE", "ATTRIBUTED_DENIAL"}, detail
 
 
 def test_the_premise_rule_needs_a_negation_not_only_a_consequence():
@@ -109,7 +112,10 @@ def test_a_negated_evidential_verb_abstains(sentence, hypothesis_id,
     detail = reviewed_relation_details(sentence, hypothesis_id)
     assert detail["relation"] is None, detail
     assert detail["relation"] is not Stance(unnegated_stance)
-    assert detail["reason_code"] == "NEGATED_CUE", detail
+    # The mechanism depends on what explains the negation: a matrix frame reports
+    # ATTRIBUTED_DENIAL, a negation inside the cue's own clause reports NEGATED_CUE.
+    # Both withhold; pinning one string here would hide which one fired.
+    assert detail["reason_code"] in {"NEGATED_CUE", "ATTRIBUTED_DENIAL"}, detail
 
 
 def test_the_literal_second_sentence_abstains_because_it_has_no_cue():
@@ -124,16 +130,25 @@ def test_the_literal_second_sentence_abstains_because_it_has_no_cue():
     assert detail["reason_code"] == "NO_CUE_MATCH", detail
 
 
-def test_the_evidential_rule_does_not_swallow_reported_speech():
-    """Neighbour: a negated speech-act verb still certifies the clause's cue.
+def test_a_denied_speech_act_withholds_its_complement():
+    """REVERSED 2026-11-02, with ``CU-MATRIX-DID-NOT-SAY``.
 
-    Corpus row ``CU-MATRIX-DID-NOT-SAY``. ``did not say`` negates the saying; the
-    cue in the complement keeps certifying. The rule is keyed to the evidential
-    verbs (confirm / establish / verify / observe / record / document / show /
-    demonstrate), not to every verb that can take a complement, or it would flip
-    a whole family of corpus rows into abstentions.
+    This was the neighbour that pinned a denied speech act as certifying: "did not
+    say" negates the saying, so the complement was read as asserted. That reading
+    treats *nobody said X* as evidence for X, which is certifying support from
+    silence — the failure a policy-evidence tool exists to prevent. Both classes
+    now withhold under a negative matrix frame; the frame module carries the
+    argument, this file carries the reading.
     """
     sentence = "The auditor did not say the binder was at the desk."
+    detail = reviewed_relation_details(sentence, HYPOTHESIS)
+    assert detail["relation"] is None, detail
+    assert detail["reason_code"] == "ATTRIBUTED_DENIAL", detail
+
+
+def test_an_affirmative_speech_act_still_certifies_its_complement():
+    """Neighbour: the rule is about negation, not about reports as such."""
+    sentence = "The auditor said the binder was at the desk."
     detail = reviewed_relation_details(sentence, HYPOTHESIS)
     assert detail["relation"] == Stance.CONTRADICTS, detail
     assert detail["reason_code"] is None, detail
@@ -161,12 +176,17 @@ def test_the_quantified_denial_rule_does_not_swallow_an_affirmative_frame():
     assert detail["reason_code"] is None, detail
 
 
-def test_the_quantified_denial_rule_does_not_swallow_a_denied_speech_act():
-    """Neighbour: ``no one said`` denies the saying, which is the pinned policy."""
+def test_a_quantified_denial_of_a_speech_act_withholds():
+    """REVERSED 2026-11-02: ``no one said`` now withholds like ``no one confirmed``.
+
+    Both are negative matrix frames; the class decides what the frame is *about*,
+    not whether a negative frame asserts anything. Keeping them different was the
+    last 11% of the falsification corpus.
+    """
     sentence = "No one said that the checklist was unavailable."
     detail = reviewed_relation_details(sentence, HYPOTHESIS)
-    assert detail["relation"] == Stance.SUPPORTS, detail
-    assert detail["reason_code"] is None, detail
+    assert detail["relation"] is None, detail
+    assert detail["reason_code"] == "ATTRIBUTED_DENIAL", detail
 
 
 def test_the_evidential_rule_does_not_swallow_an_unrelated_infinitive():
@@ -247,7 +267,10 @@ def test_the_evidence_frame_rule_leaves_a_plain_negation_of_the_cue_alone():
     detail = reviewed_relation_details("There was no time pressure during the "
                                        "shift.", "TIME_PRESSURE")
     assert detail["relation"] is None, detail
-    assert detail["reason_code"] == "NEGATED_CUE", detail
+    # The mechanism depends on what explains the negation: a matrix frame reports
+    # ATTRIBUTED_DENIAL, a negation inside the cue's own clause reports NEGATED_CUE.
+    # Both withhold; pinning one string here would hide which one fired.
+    assert detail["reason_code"] in {"NEGATED_CUE", "ATTRIBUTED_DENIAL"}, detail
 
 
 # --- Both rules share the guard's existing invariants ------------------------

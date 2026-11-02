@@ -413,10 +413,10 @@ def test_abstain_info_is_a_composition_identity_on_real_verdicts() -> None:
             violations += 1
             if first is None:
                 first = (sentence, element)
-    # 8 604 after the attributed-denial rule landed (9 576 before it, 10 530 before
-    # the postposed-hedge reader); the bound only guards against a corpus that stopped
+    # 7 661 after the negative-frame rule was extended to speech acts (8 604 before,
+    # 9 576 before that); the bound only guards against a corpus that stopped
     # producing claims to check against.
-    assert committed > 8000, f"only {committed} committed verdicts to check against"
+    assert committed > 7000, f"only {committed} committed verdicts to check against"
     assert violations == 0, f"{violations} of {committed} changed; first={first}"
 
 
@@ -430,12 +430,13 @@ def test_measured_commit_rate_and_wrong_commits() -> None:
 
     Re-measured after the postposed-hedge reader landed: 9 576 / 20 000 committed
     (47.9%), of which 1 915 (20.0%) are wrong by construction; 0 misses and 0 flips
-    on the 7 661 sentences that really do assert the cue. The figures have moved twice:
-    10 530 / 2 869 (27.2%) before the postposed-hedge reader, 9 576 / 1 915 (20.0%)
-    after it, and **8 604 / 943 (11.0%)** after the attributed-denial rule, which
-    withholds a complement under a denied evidential verb. The bounds below moved down
-    with each fix; they are regression guards, not claims of adequacy, and they fail if
-    the guard gets worse.
+    on the 7 661 sentences that really do assert the cue. The figures have moved three
+    times: 10 530 / 2 869 (27.2%) before the postposed-hedge reader, 9 576 / 1 915
+    (20.0%) after it, 8 604 / 943 (11.0%) after the evidential-denial rule, and
+    **7 661 / 0** after that rule was extended to speech acts. The bounds below moved
+    down with each fix; they are regression guards, not claims of adequacy. A corpus at
+    zero is saturated, not solved: it now measures agreement with its own generator,
+    and a fresh generator is the next real test.
     """
     score = _score()
     n = score["n"]
@@ -449,8 +450,12 @@ def test_measured_commit_rate_and_wrong_commits() -> None:
         f"{score['flips']} asserted sentences got the opposite direction; "
         f"per_operator_flip={dict(score['per_operator_flip'])}"
     )
-    assert 8400 <= score["commits"] <= 12000, f"committed {score['commits']}/{n}"
-    assert score["wrong_commits"] <= 1000, (
+    assert 7500 <= score["commits"] <= 12000, f"committed {score['commits']}/{n}"
+    # Measured: 0. The generator's ground truth and the guard now agree on every
+    # generated sentence, which means this corpus has stopped discriminating — the
+    # bound is kept at 0 so a regression is loud, and it is worth saying plainly
+    # that a metric at zero has to be replaced before it can be trusted again.
+    assert score["wrong_commits"] == 0, (
         f"{score['wrong_commits']}/{score['commits']} commits are wrong by "
         f"construction; per_operator_wrong={dict(score['per_operator_wrong'])}"
     )
@@ -489,21 +494,25 @@ CU = "CHECKLIST_UNAVAILABLE"
 
 
 def test_attack_a_cue_spanning_a_clause_boundary() -> None:
-    """FALSIFIED (recall hole): a parenthetical inside the cue hides it entirely.
+    """CLOSED (was a FALSIFIED recall hole): a parenthetical inside the cue.
 
     "The checklist, as it happens, was unavailable" asserts exactly the cue. The
-    matcher joins cue words with ``\\s+``, so whitespace inside the phrase is
-    tolerated but punctuation is not: the comma version reports NO_CUE_MATCH,
-    the newline version matches. NO_CUE_MATCH is the guard's "the quote says
-    nothing about this hypothesis", so the composition is told there is no
-    evidence where there is a direct assertion — and the algebra has no element
-    that distinguishes "no evidence" from "evidence the matcher could not see".
+    matcher joined cue words with ``\\s+``, so whitespace inside the phrase was
+    tolerated and punctuation was not: the comma version reported NO_CUE_MATCH —
+    the guard's "the quote says nothing about this hypothesis" — while the newline
+    version matched. The reader now tolerates a comma-, bracket- or dash-delimited
+    aside inside the phrase.
     """
-    comma = "The checklist, as it happens, was unavailable."
-    newline = "The checklist\nwas unavailable."
+    assert _verdict("The checklist, as it happens, was unavailable.", CU) == (
+        Stance.SUPPORTS, None)
+    assert _verdict("The checklist (as it happens) was unavailable.", CU) == (
+        Stance.SUPPORTS, None)
+    assert _verdict("The checklist\nwas unavailable.", CU) == (Stance.SUPPORTS, None)
 
-    assert _verdict(comma, CU) == (None, "NO_CUE_MATCH")
-    assert _verdict(newline, CU) == (Stance.SUPPORTS, None)
+    # Neighbours: the aside cannot *be* the cue, and cannot carry the negation.
+    assert _verdict("The checklist, as it happens.", CU) == (None, "NO_CUE_MATCH")
+    assert _verdict("The checklist, as one might expect, was not unavailable.",
+                    CU)[0] is None
 
 
 def test_attack_b_operator_whose_scope_is_the_sentence() -> None:
@@ -541,25 +550,32 @@ def test_attack_b_operator_whose_scope_is_the_sentence() -> None:
 
 
 def test_attack_c_negation_with_two_attachment_sites() -> None:
-    """FALSIFIED (false commit): negation over a reporting verb certifies the cue.
+    """CLOSED (was FALSIFIED): negation over a reporting verb certified the cue.
 
     "The team did not report that the checklist was unavailable" has two
-    attachment sites — the negation can take the reporting verb (they did not
-    say it) or the complement (they said it was not so). The dominant reading
-    asserts nothing, and the guard commits SUPPORTS: ``_REPORTING_VERB`` in the
-    guard is documented as a deliberate choice to keep certifying.
+    attachment sites, and the dominant reading asserts nothing — while the guard
+    committed SUPPORTS because a negated speech act was pinned as certifying.
+    Negation over an *evidential* verb one line away abstained, so two lists
+    disagreed about one construction; "I do not think …" was the same shape with a
+    verb in neither list.
 
-    Negation over an *evidential* verb one line away in the same inventory does
-    abstain (NEGATED_CUE), so the two lists disagree about the same construction.
-    "I do not think ..." is the same shape with a non-listed verb.
+    All three now withhold. The three reasons differ, and that is the trace
+    working: a denied speech act and a denied evidential act are both matrix
+    frames (``ATTRIBUTED_DENIAL``), while a negation inside the cue's own clause
+    is a cue negation (``NEGATED_CUE``).
     """
-    reported = "The team did not report that the checklist was unavailable."
-    neg_raising = "I do not think the checklist was unavailable."
-    evidential = "The auditor did not confirm the checklist was unavailable."
+    assert _verdict("The team did not report that the checklist was unavailable.",
+                    CU) == (None, "ATTRIBUTED_DENIAL")
+    assert _verdict("I do not think the checklist was unavailable.", CU) == (
+        None, "ATTRIBUTED_DENIAL")
+    assert _verdict("The auditor did not confirm the checklist was unavailable.",
+                    CU) == (None, "ATTRIBUTED_DENIAL")
 
-    assert _verdict(reported, CU) == (Stance.SUPPORTS, None)
-    assert _verdict(neg_raising, CU) == (Stance.SUPPORTS, None)
-    assert _verdict(evidential, CU) == (None, "NEGATED_CUE")
+    # Neighbours: affirmative frames certify, and a negation elsewhere does not reach.
+    assert _verdict("The team reported that the checklist was unavailable.", CU) == (
+        Stance.SUPPORTS, None)
+    assert _verdict("The checklist was unavailable, and I do not think so.", CU) == (
+        Stance.SUPPORTS, None)
 
 
 def test_algebra_cannot_express_the_scope_the_attacks_need() -> None:

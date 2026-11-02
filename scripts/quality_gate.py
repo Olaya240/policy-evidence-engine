@@ -431,7 +431,15 @@ def check_xfail_discipline(_fast: bool) -> Result:
             strict_node = kwargs.get("strict")
             is_strict = isinstance(strict_node, ast.Constant) and strict_node.value is True
             if not is_strict:
+                # A non-strict xfail tolerates a *passing* test: the assertion can go
+                # green and the suite still reports xfailed. That is a dead assertion
+                # with a receipt, so it is a violation, not a statistic. This used to
+                # be counted and passed.
                 non_strict += 1
+                violations.append(
+                    f"{path.relative_to(ROOT)}:{node.lineno}: non-strict xfail "
+                    "(a passing test here would be reported as xfailed, not as a pass)"
+                )
                 continue
 
             sites += 1

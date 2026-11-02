@@ -17,6 +17,19 @@ and sentence-initial operator span. It does not touch the cue inventory: a cue
 is still a fixed string, and this layer only *derives* an occurrence of that
 string in a clause whose subject was elided to a pronoun.
 
+A condition has two spellings. The marked one is ``if``/``unless``/``provided
+that``; the unmarked one is the subjunctive inversion, where the auxiliary comes
+first and the subject behind it — "Had the ward been busy, …", "Were the
+checklist unavailable, …", "Should the binder be missing, …". Both open a
+condition, so this layer reads them at every placement it reads ``if``, and the
+inversion reaches clauses coordinated after it for the same reason. What it
+cannot see is a condition it has no marker for: an inversion inside a quotation
+sits mid-clause behind the quotation's frame, so it opens nothing and is not
+seen; an inversion inside a reported clause *is* read, as a condition, because
+reporting does not change what the marker proposes; and a bare participle with
+no auxiliary in front of it ("the checklist been unavailable") names no marker
+at all.
+
 Three rules are deliberately absent because the existing pins forbid them:
 
 * a subject quantifier over a reporting verb ("No one confirmed that the
@@ -62,6 +75,27 @@ _CONDITIONAL_OPENING = re.compile(
 #: ("… was unavailable if the ward was busy").
 _CONDITIONAL_MARKER = re.compile(
     r"\b(?:if|unless|provided\s+that)\b", re.IGNORECASE)
+#: An inverted subjunctive conditional puts the auxiliary *first* and the
+#: subject second, with no ``if`` to key on: "Had the ward been busy, …", "Were
+#: the checklist unavailable, …", "Should the binder be missing, …". The same
+#: three words are ordinary verbs in "The team had enough time" and "We were
+#: short staffed", so position — not vocabulary — is what separates the two.
+_INVERSION_OPENING = re.compile(r"^\s*(?P<aux>had|were|should)\b", re.IGNORECASE)
+#: The same inversion after a boundary, for the postposed form ("… was
+#: unavailable had the ward been busy").
+_INVERSION_AFTER = re.compile(
+    r"(?:^\s*|[,;]\s*|\b(?:and|but|or|so|then|yet|nor)\s+)"
+    r"(?P<aux>had|were|should)\b",
+    re.IGNORECASE,
+)
+#: Words that cannot open a predicate. When the word after the auxiliary and its
+#: subject is one of these, the clause is not read as an inversion: "Were the
+#: checklist and the binder …" has a coordinated subject, not a predicate.
+_INVERSION_NON_PREDICATE = frozenset({
+    "and", "or", "but", "of", "in", "on", "at", "to", "for", "with", "from",
+    "by", "as", "than", "that", "which", "who", "whom", "whose", "when",
+    "where", "while", "because", "if", "unless", "so", "then",
+})
 #: A contrastive opening sets the clause against what precedes it, so an
 #: operator before it does not reach through.
 _CONTRAST_OPENING = re.compile(
@@ -229,6 +263,55 @@ def _subject_span(text, start, end):
     if _is_verbish(words[0]):
         return None
     return (words[0], offset, offset + len(words[0]), _number(words[0]))
+
+
+# --- subjunctive inversion --------------------------------------------------
+
+
+def _inversion_opens(window):
+    """Does ``window`` open with a subjunctive inversion?
+
+    The shape read is auxiliary + subject + predicate: ``had``/``were``/``should``,
+    then a pronoun, a determiner-led noun phrase, or a bare noun, then at least
+    one word that can open a predicate. That is the whole test, and it is a
+    *positional* one: the same three words are ordinary verbs once a subject
+    precedes them, which is why "The team had enough time" and "We were short
+    staffed" never qualify — their auxiliary is not the clause's first word.
+
+    Two details the shape has to admit:
+
+    * the complement need not be a past participle. The inverted subjunctive
+      also takes a predicative adjective — "Were the checklist unavailable" — so
+      the check is that a predicate *can* follow, not that a participle does;
+    * a coordinated subject runs through one coordinator ("Were the checklist
+      and the binder both missing"), because a determiner after the conjunction
+      belongs to the second conjunct, not to the predicate.
+
+    Deliberately shallow, in the same way as ``_subject_span``: the subject is
+    read at most two words deep, so an inversion over a long noun phrase is not
+    seen.
+    """
+    head = _INVERSION_OPENING.match(window)
+    if head is None:
+        return False
+    words = _tokens(window[head.end():])
+    if len(words) < 2:
+        return False
+    first = _clean(words[0])
+    if first in _DETERMINERS:
+        index = 1
+        while index < len(words):
+            word = _clean(words[index])
+            if index == 1 or word in _DETERMINERS or word in ("and", "or"):
+                index += 1
+                continue
+            return word not in _INVERSION_NON_PREDICATE
+        return False
+    if first in _PRONOUNS:
+        return _clean(words[1]) not in _INVERSION_NON_PREDICATE
+    if first in _NON_REFERENTIAL or first in _INVERSION_NON_PREDICATE:
+        return False
+    return _clean(words[1]) not in _INVERSION_NON_PREDICATE
 
 
 # --- cue phrase shape -------------------------------------------------------
@@ -400,6 +483,30 @@ class SentenceScope:
 
     # -- conditional scope ---------------------------------------------------
 
+    def _clause_asks(self, clause):
+        """Is this clause terminated by a question mark?
+
+        Inverted word order is also a question's word order: "Should the
+        checklist be reviewed before the audit?" has an inversion's shape and
+        proposes nothing — it asks. The terminator sits outside the clause span,
+        so it is read from the source text, and only spaces and tabs are allowed
+        between them (a newline would already be a sentence boundary).
+        """
+        return self.text[clause.end:].lstrip(" \t").startswith("?")
+
+    def _opens_condition(self, clause):
+        """Does this clause *open* a condition — by marker word or by inversion?
+
+        The two are one reading with two spellings: ``if``/``unless``/``provided
+        that``, or ``had``/``were``/``should`` with the subject behind it. The
+        inversion is refused when the clause is interrogative.
+        """
+        if _CONDITIONAL_OPENING.match(clause.text):
+            return True
+        if not _inversion_opens(clause.text):
+            return False
+        return not self._clause_asks(clause)
+
     def conditional_scope_at(self, offset, cue_end=None):
         """Is the clause at ``offset`` a conditional's consequent, not asserted?
 
@@ -408,19 +515,43 @@ class SentenceScope:
         …"), or the marker opens a preceding clause of the same span ("If …,
         the cue"). The span stops at a contrastive opening, so a "but" clause is
         read as asserted.
+
+        An inverted subjunctive is read at every one of those placements, and
+        reaches coordinated clauses after it exactly as ``if`` does, because the
+        inversion *is* the marker and only its position differs:
+
+        * "Had the ward been busy, the checklist was unavailable" — the marker
+          opens a preceding clause;
+        * "Were the checklist unavailable" — the marker opens the cue's own
+          clause;
+        * "… was unavailable had the ward been busy" — the marker follows the
+          cue, alone in its clause.
+
+        Two limits. The layer has no quotation awareness: an inversion inside a
+        quote — ``the note said "had the ward been busy, …"`` — sits in the
+        middle of the frame's clause instead of opening one, so it is not seen
+        and the quoted consequent is left certifying. And the shape requires a
+        subject, so an elliptical inversion with none in the text is not seen
+        either. Negation inside the predicate ("Had it not been for the binder")
+        does not block the read: it is the marker's position that matters.
         """
         clause = self.clause_at(offset)
-        if _CONDITIONAL_OPENING.match(clause.text):
+        if self._opens_condition(clause):
             return True
-        if cue_end is not None and _CONDITIONAL_MARKER.search(
-                self.text[cue_end:clause.end]):
-            return True
+        if cue_end is not None:
+            tail = self.text[cue_end:clause.end]
+            if _CONDITIONAL_MARKER.search(tail):
+                return True
+            if not self._clause_asks(clause):
+                for found in _INVERSION_AFTER.finditer(tail):
+                    if _inversion_opens(tail[found.start("aux"):]):
+                        return True
         if _CONTRAST_OPENING.match(clause.text):
             return False
         for prior in reversed(self._sentence_prefix(clause)):
             if _CONTRAST_OPENING.match(prior.text):
                 return False
-            if _CONDITIONAL_OPENING.match(prior.text):
+            if self._opens_condition(prior):
                 return True
         return False
 

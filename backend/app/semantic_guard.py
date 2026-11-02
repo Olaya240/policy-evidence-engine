@@ -13,7 +13,7 @@ import re
 
 from .models import Stance
 from .scope_layer import SentenceScope, build_scope
-from .evidence_frames import Force, force_of_prefix
+from .evidence_frames import EVIDENTIAL, Force, force_of_prefix, verb_class_of
 from .stance_algebra import (
     Clause,
     Modality,
@@ -34,9 +34,15 @@ _NEGATION_SUFFIX = re.compile(
 )
 
 _CONTRASTING_CURRENT_NEGATION = re.compile(
-    r"^\s*(?:(?:am|is|are|was|were|do|does|did)\s+)?"
+    # A subject may open the clause ("…, but it is not short staffed any more"):
+    # the first version anchored straight onto the auxiliary, so every contrast
+    # with an explicit subject fell through and the stale state was certified.
+    r"^\s*(?:(?:it|they|we|he|she|i|you|staff|the\s+[\w’'-]+)\s+)?"
+    r"(?:(?:am|is|are|was|were|do|does|did|has|have|had)\s+)?"
     r"(?:not|never|no\s+longer)\b"
-    r"(?:\s+[\w’'-]+){0,2}\s*(?:now|anymore|currently|today)\b",
+    # ``any more`` is two words and means the same as ``anymore``; requiring the
+    # one-word spelling was a lexicographic accident, not a reading.
+    r"(?:\s+[\w’'-]+){0,3}\s*(?:now|anymore|any\s+more|currently|today)\b",
     re.IGNORECASE,
 )
 _CURRENT_MARKER = re.compile(r"\b(?:now|anymore|currently|today)\b", re.IGNORECASE)
@@ -91,15 +97,14 @@ _NEGATION_IN_CLAUSE = re.compile(
 
 # "The team did not confirm the checklist was available": the negation scopes over
 # the evidential verb, and the sentence states the absence of confirmation rather
-# than the falsity of the cue. Only evidential verbs are listed. Speech-act verbs
-# (say / claim / report / state / note) negate the saying, not the complement, and
-# the corpus pins them as still certifying ("The auditor did not say the binder was
-# at the desk" -> CONTRADICTS).
-_EVIDENTIAL_VERB = re.compile(
-    r"\b(?:confirm|confirmed|establish|established|verify|verified|observe|"
-    r"observed|record|recorded|document|documented|demonstrate|demonstrated)\b",
-    re.IGNORECASE,
-)
+# than the falsity of the cue. Speech-act verbs (say / claim / report / state /
+# note) negate the saying, not the complement, so they are an attribution finding
+# rather than a negated cue. The classes live in ``evidence_frames``: this module
+# used to carry its own ``_EVIDENTIAL_VERB`` list, a second copy of part of
+# ``EVIDENTIAL_VERBS`` that had already fallen behind it (no ``check``, no
+# ``substantiate``), so the two could disagree about one construction. There is no
+# verb list here any more; ``_denied_evidential_verb`` asks the frame module.
+_WORD = re.compile(r"[A-Za-z][A-Za-z'’\-]*")
 
 # "No evidence the checklist was available" is a statement about the evidence
 # base, not about the checklist: the cue is reported as unestablished rather than
@@ -155,12 +160,6 @@ _CONDITIONAL_CLAUSE_OPENING = re.compile(
 )
 
 _SUBJECT_QUANTIFIER = re.compile(r"\b(?:nobody|no\s+one|none\s+of|neither)\b", re.IGNORECASE)
-_REPORTING_VERB = re.compile(
-    r"\b(?:said|says|saying|claimed|claims|reported|reports|mentioned|mentions|"
-    r"noted|notes|stated|states|argued|argues|suggested|suggests|denied|denies|"
-    r"told|tells|wrote|writes|confirmed|confirms)\b",
-    re.IGNORECASE,
-)
 
 
 def _is_quantified_negation(final_clause: str) -> bool:
@@ -168,16 +167,49 @@ def _is_quantified_negation(final_clause: str) -> bool:
 
     "Nobody walked through the handover" negates the walking. "No one said that
     the binder was missing" negates the saying: the cue sits in a complement
-    clause, so either an explicit complementiser or a reporting verb between the
+    clause, so either an explicit complementiser or a matrix verb between the
     quantifier and the cue means the quantifier does not scope over it.
+
+    This site asks only *whether* a matrix verb intervenes, so it accepts either
+    class from ``evidence_frames`` (``verb_class_of`` is not ``None``) rather
+    than testing for one: which class the verb is in, and what denying it does,
+    is read by ``_denied_evidential_verb`` and by ``force_of_prefix``. It used to
+    keep a third list of its own, ``_REPORTING_VERB``, which was a speech-act
+    list with two evidential verbs mixed into it.
     """
     quantifier = _SUBJECT_QUANTIFIER.search(final_clause)
     if quantifier is None:
         return False
     tail = final_clause[quantifier.end():]
-    if _REPORTING_VERB.search(tail) is not None:
+    if any(verb_class_of(match.group(0)) is not None for match in _WORD.finditer(tail)):
         return False
     return re.search(r"\bthat\b", tail, re.IGNORECASE) is None
+
+
+def _denied_evidential_verb(segment: str) -> bool:
+    """Does a negation in ``segment`` scope over an *evidential* matrix verb?
+
+    ``"The team did not confirm the checklist was available"`` reports the absence
+    of confirmation, so the negation reaches the cue's clause and the cue is not
+    certified — ``NEGATED_CUE``.
+
+    The verb class is read from ``evidence_frames.verb_class_of``; there is no verb
+    list in this module any more (it used to keep ``_EVIDENTIAL_VERB``, a second
+    copy of part of ``EVIDENTIAL_VERBS`` that had already fallen behind it: no
+    ``check``, no ``substantiate``).
+
+    This site asks for the evidential class specifically, which is a *narrower*
+    question than the frame layer's, not a second copy of its list: a denied
+    speech act leaves the cue's wording and its reference untouched —
+    ``"The auditor did not say the binder was at the desk"`` is a claim about what
+    was said — so it belongs to ``ATTRIBUTED_DENIAL``, which ``force_of_prefix``
+    reports, and not to ``NEGATED_CUE``. Reading every withholding class here would
+    relabel those sentences as negated cues and lose the distinction the corpus
+    rows are written in.
+    """
+    return any(
+        verb_class_of(match.group(0)) == EVIDENTIAL for match in _WORD.finditer(segment)
+    )
 
 
 def _cue_prefix_clause(text: str, start: int) -> str:
@@ -204,8 +236,8 @@ def _is_negated_premise_clause(final_clause: str) -> bool:
     return any(_NEGATION_IN_CLAUSE.search(segment) for segment in segments[:-1])
 
 
-def _is_negated_evidential_verb(final_clause: str) -> bool:
-    """A negation over an evidential verb in the cue's own comma segment.
+def _is_negated_matrix_verb(final_clause: str) -> bool:
+    """A negation over an evidential matrix verb in the cue's own segment.
 
     "The team did not confirm the checklist was available" reports the absence of
     confirmation. Neither the cue nor its negation is stated, so nothing can be
@@ -216,7 +248,7 @@ def _is_negated_evidential_verb(final_clause: str) -> bool:
     negation = _NEGATION_IN_CLAUSE.search(segment)
     if negation is None:
         return False
-    return _EVIDENTIAL_VERB.search(segment[negation.end():]) is not None
+    return _denied_evidential_verb(segment[negation.end():])
 
 
 def _negation_scope(final_clause: str) -> NegationScope:
@@ -228,13 +260,21 @@ def _negation_scope(final_clause: str) -> NegationScope:
     of a report — but every one of them withholds the clause rather than flipping
     it. Which scope fired is recorded, not used to pick a direction.
     """
+    # A negation that a matrix frame explains is that frame's business. Reporting it
+    # as a cue negation (NEGATED_CUE) says the cue itself was negated, which is
+    # false for "I do not think the checklist was unavailable": the negation is over
+    # the speaker's knowledge, and the reader's own reason code for that is
+    # ATTRIBUTED_DENIAL. Both withhold; only the trace differs, and a trace that
+    # misnames the mechanism is worse than no trace.
+    if force_of_prefix(final_clause) is Force.WITHHOLDS:
+        return NegationScope.NONE
     if (_NEGATION_SUFFIX.search(final_clause) is not None
             or _NEGATED_AUXILIARY_SUFFIX.search(final_clause) is not None):
         return NegationScope.ADJACENT
     if (_NEGATED_FRAME.search(final_clause) is not None
             or _is_negated_premise_clause(final_clause)):
         return NegationScope.FRAME
-    if _is_negated_evidential_verb(final_clause):
+    if _is_negated_matrix_verb(final_clause):
         return NegationScope.VERB_SEPARATED
     return NegationScope.NONE
 
@@ -257,7 +297,13 @@ def _is_evidence_aboutness_frame(final_clause: str) -> bool:
 
 
 _POSTPOSED_HEDGE = re.compile(
-    r"^\s*,\s*(?:perhaps|possibly|probably|maybe|presumably|apparently|conceivably)\b",
+    r"^\s*,\s*(?:perhaps|possibly|probably|maybe|presumably|apparently|conceivably)\b"
+    # A parenthetical epistemic clause is the same hedge with a subject: "…, I
+    # think" hedges exactly as "…, probably" does. The list is closed and first
+    # person, because "…, they think" reports someone else and belongs to the
+    # attribution frame instead.
+    r"|^\s*,\s*(?:i|we)\s+(?:think|believe|reckon|suspect|assume|suppose|understand)\b"
+    r"|^\s*,\s*(?:it\s+seems|in\s+my\s+view|to\s+my\s+knowledge|as\s+far\s+as\s+i\s+know)\b",
     re.IGNORECASE,
 )
 
@@ -436,6 +482,72 @@ def _cue_id(hypothesis_id: str, stance: Stance, phrase: str) -> str:
     return f"{hypothesis_id}.{stance.value}.{slug}"
 
 
+#: A parenthetical that may sit *inside* a fixed cue phrase without breaking it.
+#: Cue words used to be joined with ``\s+`` alone, so punctuation ended the
+#: phrase: ``"The checklist, as it happens, was unavailable."`` reported
+#: ``NO_CUE_MATCH`` — "the quote says nothing about this hypothesis" — while the
+#: same sentence with a newline where the comma is matched and certified. That
+#: reason code is false for this sentence: it asserts the cue directly. The aside
+#: is the *only* thing allowed between two cue words besides whitespace, it must
+#: be delimited on both sides, and every cue word still has to appear, in order,
+#: so an aside can never stand in for the cue (``"The checklist, as it happens."``
+#: on its own still matches nothing). Deliberately excluded: a bare comma-glued
+#: word (``"checklist, unavailable"``), which is a list, not a parenthetical.
+_PARENTHETICAL_ASIDE = (
+    r"(?:[ \t]*,[^,;:.!?()\[\]\n]+,[ \t]*"              # ", as it happens, "
+    r"|[ \t]*\([^()\n]+\)[ \t]*"                        # "(as it happens)"
+    r"|[ \t]*\[[^\[\]\n]+\][ \t]*"                      # "[as it happens]"
+    r"|[ \t]+[\u2014\u2013][^\u2014\u2013\n]+[\u2014\u2013][ \t]*"  # " — as it happens — "
+    r"|[ \t]+-\s[^-\n]*?[ \t]-[ \t]*)"                    # " - as it happens - "
+)
+
+#: Negation words taken out of the aside before it is scanned for a cue, so
+#: ``"the binder was not missing"`` — a cue with its direction reversed — still
+#: reads as a claim about that cue rather than as a parenthetical.
+_ASIDE_NEGATION = re.compile(
+    r"\b(?:not|never|no|without|nor)\b|\b\w+n['’]t\b", re.IGNORECASE
+)
+
+
+def _phrase_pattern(phrase: str) -> str:
+    """The regex for one fixed cue phrase, tolerant of a parenthetical aside.
+
+    Whitespace is the normal joiner between cue words; a delimited aside is the
+    only other one. Each joiner is captured so the match can be re-read: an aside
+    that is really a clause about a cue disqualifies the whole occurrence, and
+    that decision needs the joiner text, which a regex over the inventory cannot
+    make.
+    """
+    parts = [re.escape(part) for part in phrase.split()]
+    pattern = parts[0]
+    for part in parts[1:]:
+        pattern += r"(\s+|" + _PARENTHETICAL_ASIDE + r")" + part
+    return pattern
+
+
+def _aside_claims_a_cue(found: re.Match, cue_scan: re.Pattern) -> bool:
+    """Does an aside inside ``found`` carry a cue of its own?
+
+    ``"The checklist, as the binder was missing, was unavailable."`` is two
+    claims joined by a comma, and a comma is a clause boundary everywhere else
+    here (``_cue_prefix_clause``, ``_is_hedged``, ``_is_negated_premise_clause``
+    all split on it). Matching the cue phrase *across* that boundary would type
+    the sentence from half of it, so the occurrence is dropped and the clauses
+    are read separately, as they were before the aside rule existed.
+
+    The negation is set aside before the scan because negation does not stop an
+    aside being a claim about the cue: ``"the binder was not missing"`` is the
+    claim with its direction reversed, and skipping it is exactly the kind of
+    false commit this guard refuses everywhere else.
+    """
+    for joiner in found.groups():
+        if not joiner or not joiner.strip():
+            continue
+        if cue_scan.search(_ASIDE_NEGATION.sub(" ", joiner)) is not None:
+            return True
+    return False
+
+
 def reviewed_relation_details(quote: str, hypothesis_id: str) -> dict:
     """Return the guard's existing decision plus bounded trace metadata.
 
@@ -457,10 +569,18 @@ def reviewed_relation_details(quote: str, hypothesis_id: str) -> dict:
     # One sentence-scope pass per quote, shared by every cue in it: the clause
     # structure is a property of the sentence, not of the cue being read.
     scope = build_scope(quote)
+    # One inventory scan for the aside reader, so an aside that carries a cue is
+    # recognised as a clause rather than a parenthetical.
+    cue_scan = re.compile("|".join(
+        r"\s+".join(re.escape(part) for part in phrase.split())
+        for phrases in cues.values() for phrase in phrases
+    ), re.IGNORECASE)
     for stance, phrases in cues.items():
         for phrase in phrases:
-            phrase_pattern = r"\s+".join(re.escape(part) for part in phrase.split())
+            phrase_pattern = _phrase_pattern(phrase)
             for found in re.finditer(phrase_pattern, quote, re.IGNORECASE):
+                if _aside_claims_a_cue(found, cue_scan):
+                    continue
                 saw_cue = True
                 cue_id = _cue_id(hypothesis_id, stance, phrase)
                 if cue_id not in matched_cue_ids:

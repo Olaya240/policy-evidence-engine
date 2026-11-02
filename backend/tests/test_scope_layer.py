@@ -121,6 +121,79 @@ def test_a_conditional_marker_in_the_other_sentence_does_not_reach():
     assert scope.conditional_scope_at(offset) is False
 
 
+# --- inverted subjunctive conditional ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sentence, cue",
+    [
+        ("Had the ward been busy, the checklist was unavailable.",
+         "was unavailable"),
+        ("Were the checklist unavailable, the team should have escalated.",
+         "should have escalated"),
+        ("Should the binder be missing, the audit is void.", "is void"),
+        # Coordinated after the inversion, which is the "exactly like if" half:
+        # the marker reaches the third clause as well.
+        ("Had the checklist been reviewed, the audit was signed off, and the "
+         "binder was missing.", "was missing"),
+    ],
+)
+def test_an_inverted_subjunctive_scopes_a_clause_like_if(sentence, cue):
+    """`Had|Were|Should` + subject + predicate opens a condition with no `if`.
+
+    The marker is inside the clause — inversion, no subordinator — so a reader
+    that only looks for `if`/`unless`/`provided that` sees an ordinary
+    declarative and certifies the consequent. `cond-h2` in
+    `tests/test_semantic_benchmark.py` records that as the unsafe direction.
+    """
+    scope = build_scope(sentence)
+    assert scope.conditional_scope_at(sentence.casefold().index(cue)) is True
+
+
+def test_the_inverted_antecedent_itself_is_inside_the_condition():
+    """Both sides of the comma are in the span, as with a marked conditional."""
+    sentence = "Were the checklist unavailable, the team should have escalated."
+    scope = build_scope(sentence)
+    assert scope.conditional_scope_at(sentence.casefold().index("unavailable")) is True
+
+
+def test_an_inversion_placed_after_the_cue_is_read_from_its_position():
+    """The postposed form (`…, had the ward been busy`) is the same marker."""
+    sentence = "The checklist was unavailable had the ward been busy."
+    scope = build_scope(sentence)
+    cue = "was unavailable"
+    start = sentence.casefold().index(cue)
+    assert scope.conditional_scope_at(start, cue_end=start + len(cue)) is True
+
+
+@pytest.mark.parametrize(
+    "sentence, cue",
+    [
+        # The three words as ordinary verbs: a subject in front of them means
+        # the auxiliary is not the clause's first word, so nothing is proposed.
+        ("The team had enough time.", "enough time"),
+        ("We were short staffed.", "short staffed"),
+        # `had been reviewed` in a subordinate position: the auxiliary is not
+        # clause-initial, so it is a past perfect, not an inversion.
+        ("The auditor asked whether the checklist had been reviewed twice.",
+         "had been reviewed"),
+        ("The checklist, which had been reviewed twice, was unavailable.",
+         "had been reviewed"),
+        # Inverted word order is also a question's, and a question proposes
+        # nothing for the guard to read.
+        ("Should the checklist be reviewed before the audit?", "be reviewed"),
+        ("Had the team run out of time?", "run out of time"),
+        # A contrastive opening still stops the span, exactly as it does for `if`.
+        ("Had the ward been busy, but the checklist was unavailable.",
+         "was unavailable"),
+    ],
+)
+def test_an_auxiliary_that_does_not_open_a_condition_is_left_alone(sentence, cue):
+    """Neighbours: seven ways to put `had`/`were`/`should` in a sentence safely."""
+    scope = build_scope(sentence)
+    assert scope.conditional_scope_at(sentence.casefold().index(cue)) is False
+
+
 # --- sentence-initial hedge span -------------------------------------------
 
 

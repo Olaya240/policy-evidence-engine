@@ -23,27 +23,59 @@ asserted, no matter what the others say. That law is proved in
 ``ct3/Attribution.v`` and exercised over generated sentences in
 ``tests/test_evidence_frames.py``.
 
-Why only evidential denials withhold
-------------------------------------
-The policy split is deliberate and is *not* a claim about English:
+The policy, as a table
+----------------------
+A frame's force depends only on its polarity and on the class of the verb doing
+the reporting:
 
-* **evidential** verbs (``confirm``, ``check``, ``verify``, ``establish``,
-  ``document``, ``observe``, ``record``, ``demonstrate``) report that something
-  was established. Denying them denies the establishment, so the complement is
-  not asserted: ``"No one confirmed that the checklist was unavailable"`` is
-  evidence *about the evidence base*, not about the checklist.
-* **speech-act** verbs (``say``, ``claim``, ``report``, ``mention``, ``note``,
-  ``state``, ``argue``, ``suggest``, ``tell``, ``write``) report that words were
-  uttered. Denying them denies the utterance and leaves the content untouched,
-  which is the reading the negation corpus pins
-  (``CU-MATRIX-DID-NOT-SAY``, ``CU-MATRIX-NEVER-CLAIMED``,
-  ``SC-NO-ONE-REPORTED``).
+    polarity      verb class      force
+    -----------   -------------   --------
+    affirmative   evidential      ASSERTS
+    affirmative   speech act      ASSERTS
+    negated       evidential      WITHHOLDS
+    negated       speech act      WITHHOLDS
 
-The second rule is a policy choice, not a theorem, and the falsification corpus
-counts it: roughly a sixth of the generated hostile sentences still commit a
-direction through a denied speech act. It is named in
-``ct3/audit/REVIEW-scope-interval.md`` as the remaining product decision rather
-than fixed here, because reversing it changes what the tool is allowed to claim.
+In one line: ``effective_negation && (evidential || speech_act) -> WITHHOLDS``.
+Only an affirmative frame certifies. The class is still carried on the frame
+because it says *what kind of act* the sentence attributed — ``confirm`` reports
+an establishment, ``say`` reports an utterance — but it no longer decides the
+verdict, and the two classes must not diverge again.
+
+Why every denied report withholds
+---------------------------------
+The last row of that table once read ``ASSERTS``. The argument for it was that
+denying an utterance denies only that words were spoken and leaves their content
+untouched, so ``"None of the staff reported that the checklist was unavailable"``
+denied the report and said nothing either way about the checklist — and the cue
+was then read as if it had been asserted.
+
+That argument gets the semantics roughly right and the product wrong. A denied
+report is not a faint statement about the checklist; it is evidence that the
+statement is *absent from the record*. A reviewer asking "does this file show the
+checklist was unavailable?" is asking about the evidence base, and "nobody said
+so" answers that question with a no. Reading it as a yes — certifying the
+complement's direction out of silence about the complement — is precisely the
+failure mode a policy-evidence tool exists to prevent, and it is the one error a
+reader cannot catch by checking the citation: the sentence is real, the quote
+supports it, and the inference from it is the invention.
+
+The evidential row already refuses this. ``"No one confirmed that the checklist
+was unavailable"`` and ``"No one reported that the checklist was unavailable"``
+are the same sentence with one vocabulary item swapped: a quantifier over a
+denied report, in both cases an absence of evidence about the checklist. Letting
+the two classes disagree made the verdict turn on which verb the author happened
+to choose, which is the exact defect this module was written to remove; the
+speech-act half survived that rewrite only as a recorded product decision
+(``ct3/audit/REVIEW-scope-interval.md``), and it was reversed on 2026-11-02.
+
+The cost is a lost certification, not a weakened guard, and it is measured: on
+the falsification corpus every commit that arrived through a denied speech act
+was wrong by construction, so withholding them removes wrong commits and
+commits in equal number rather than trading accuracy for recall. What remains
+certifying is the affirmative frame — ``"Staff reported that the checklist was
+unavailable"`` — and a negated frame that does not scope over its own reporting
+verb (a negation in a separate clause, a contrast, a quoted denial) never becomes
+a negated frame here at all, so it keeps its force.
 """
 
 from __future__ import annotations
@@ -98,9 +130,20 @@ EVIDENTIAL_VERBS = frozenset({
     "record", "records", "recorded", "recording",
     "demonstrate", "demonstrates", "demonstrated", "demonstrating",
     "substantiate", "substantiates", "substantiated",
+    # Cognition verbs: "I do not think the checklist was unavailable" reports the
+    # speaker's knowledge state exactly as "did not confirm" reports an
+    # establishing act. Negated, neither asserts the complement. They were the
+    # last construction in the falsification corpus that still certified.
+    "think", "thinks", "thought",
+    "believe", "believes", "believed",
+    "expect", "expects", "expected",
+    "recall", "recalls", "recalled",
+    "remember", "remembers", "remembered",
+    "know", "knows", "knew", "known",
 })
 
-#: Verbs that report an *utterance*. Denying one leaves the content untouched.
+#: Verbs that report an *utterance*. Denying one denies that the content was
+#: put on the record at all, which is an absence of evidence and not support.
 SPEECH_ACT_VERBS = frozenset({
     "say", "says", "said", "saying",
     "claim", "claims", "claimed", "claiming",
@@ -132,6 +175,15 @@ _NONE_QUANTIFIER = re.compile(
     re.IGNORECASE,
 )
 
+#: A bare ``no`` determiner as the subject of the reporting verb that follows:
+#: ``"No supervisor said …"`` negates the subject in the same way ``"No one
+#: said …"`` does, and the quantifier list above only spells the pronoun form.
+#: Anchored to the end of the verb's clause on purpose — in ``"There was no doubt
+#: that the auditor documented …"`` the ``no`` is not the subject of the verb, and
+#: that sentence asserts.
+_NO_DETERMINER_SUBJECT = re.compile(
+    r"\bno\s+[A-Za-z][A-Za-z'’\-]*\s*$", re.IGNORECASE)
+
 _SOME_QUANTIFIER = re.compile(
     r"\b(?:some|several|a\s+few|many|most|a\s+number\s+of)\b",
     re.IGNORECASE,
@@ -156,7 +208,14 @@ class Attribution:
     verb_class: str
 
     def withholds(self) -> bool:
-        return self.polarity == POLARITY_NEGATED and self.verb_class == EVIDENTIAL
+        """A denied report withholds its complement, whatever kind of report it was.
+
+        The class is checked rather than assumed so that a future third class does
+        not inherit certification by default: the rule is ``negated`` *and* a
+        recognised reporting class, not ``negated`` alone.
+        """
+        return (self.polarity == POLARITY_NEGATED
+                and self.verb_class in (EVIDENTIAL, SPEECH_ACT))
 
     def describe(self) -> str:
         return (f"{self.verb_class}:{self.polarity}:{self.quantifier}"
@@ -170,8 +229,8 @@ def verb_class_of(verb: str) -> str | None:
 def assertion_force(attribution: Attribution) -> Force:
     """The total function the whole module exists for.
 
-    Negated evidential frame -> ``WITHHOLDS``. Every other recognised frame ->
-    ``ASSERTS``. There is no third outcome on purpose: a frame whose class is
+    Negated frame (evidential or speech act) -> ``WITHHOLDS``. Affirmative frame
+    -> ``ASSERTS``. There is no third outcome on purpose: a frame whose class is
     unknown never becomes an ``Attribution`` at all, so an unrecognised verb
     cannot silently certify.
     """
@@ -220,6 +279,7 @@ def _subject_before(text: str, end: int) -> str:
     if comma != -1:
         window = window[comma + 1:]
     window = _NONE_QUANTIFIER.sub(" ", window)
+    window = _NO_DETERMINER_SUBJECT.sub(" ", window)
     window = _SOME_QUANTIFIER.sub(" ", window)
     return " ".join(window.split())
 
@@ -234,8 +294,8 @@ def frames(prefix: str) -> tuple[Attribution, ...]:
 
     Recognition is deliberately shallow: no parse tree, no dependency labels. The
     question this answers is only "does any matrix clause deny that the
-    proposition was established", and a shallow scan answers it without pretending
-    to more structure than the code has.
+    proposition was reported", and a shallow scan answers it without pretending to
+    more structure than the code has.
     """
     found: list[Attribution] = []
     for match in _WORD.finditer(prefix):
@@ -248,9 +308,11 @@ def frames(prefix: str) -> tuple[Attribution, ...]:
         # verb's own clause, so a denial in a previous sentence cannot reach it.
         before = _clause_of(prefix, match.start())
         negated = _NEGATION.search(before) is not None
-        if _NONE_QUANTIFIER.search(before) is not None:
+        none_subject = (_NONE_QUANTIFIER.search(before) is not None
+                        or _NO_DETERMINER_SUBJECT.search(before) is not None)
+        if none_subject:
             negated = True
-        quantifier = QUANTIFIER_NONE if _NONE_QUANTIFIER.search(before) else (
+        quantifier = QUANTIFIER_NONE if none_subject else (
             QUANTIFIER_SOME if _SOME_QUANTIFIER.search(before) else QUANTIFIER_ALL
         )
         # A verb with no complementiser after it is probably the main predicate of

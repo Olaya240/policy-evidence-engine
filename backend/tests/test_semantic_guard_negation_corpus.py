@@ -4,21 +4,28 @@
 sits between the negation word and the cue ("did not have enough time ...").
 That fix is only correct if it fires on true clause negation and stays silent
 when ``not`` / ``no`` / ``never`` appears in the sentence without negating the
-cue's own clause ("No one said the binder was missing.").
+cue's own clause ("The checklist was unavailable, not the binder."). A negation
+over a *report* of the cue is a third case again: it does not negate the cue, but
+it denies that the cue was put on the record, so the guard withholds with
+``ATTRIBUTED_DENIAL`` rather than certifying ("No one said the binder was
+missing.").
 
 Every row below asserts both the exact relation and the exact reason code:
 
 * ``NEGATED`` rows are true negations of the matched cue. The guard must abstain
   with ``NEGATED_CUE``; certifying either direction inverts the sentence.
-* ``WITHHELD`` rows deny that the proposition was *established* (a quantifier or a
-  negation over an evidential verb). The complement is not asserted, so the guard
-  abstains with ``ATTRIBUTED_DENIAL``; the same shape over a speech-act verb
-  belongs to ``CERTIFIES`` and is pinned there.
-* ``CERTIFIES`` rows contain a negation token that does *not* negate the cue
-  (contrast, matrix-clause negation with the cue in the complement, a quoted
-  "No", a negation inside a NEUTRAL cue's own wording, negation of a different
-  cue in the same sentence). They must still certify the cue's stance with no
-  reason code.
+* ``WITHHELD`` rows deny that the proposition was *reported* — a quantifier or a
+  negation over a reporting verb of either class, evidential (``confirm``) or
+  speech act (``say``). The complement is not asserted, so the guard abstains with
+  ``ATTRIBUTED_DENIAL``. Both classes withhold since 2026-11-02: a denied report
+  is an absence of evidence about the complement, and certifying a direction out
+  of silence is the failure mode this corpus exists to catch.
+* ``CERTIFIES`` rows contain a negation token that does *not* negate the cue or
+  its report (contrast, a quoted "No", a negation in a separate clause, a
+  negation inside a NEUTRAL cue's own wording, a negation of a different cue in
+  the same sentence). They must still certify the cue's stance with no reason
+  code. A row only belongs here when the negation does not scope over a reporting
+  verb — the set shrank on 2026-11-02, it did not disappear.
 
 Rows whose expectation the guard does not meet are left failing on purpose: the
 failing assertion is the defect report (see ``ct3/audit/W9-negation-corpus.md``).
@@ -39,10 +46,13 @@ CORPUS = [
     ("CU-NOBODY-SAW", "Nobody saw the binder was missing.", "CHECKLIST_UNAVAILABLE", None, "NEGATED_CUE", "NEGATED"),
     ("PMS-NO-ONE-NOTICED", "No one noticed the system timed out.", "PMS_SYSTEM_ISSUE", None, "NEGATED_CUE", "NEGATED"),
     ("TP-NOBODY-HAD", "Nobody had time pressure during the shift.", "TIME_PRESSURE", None, "NEGATED_CUE", "NEGATED"),
-    # Quantifier over a reporting verb, not the cue: the cue must still certify.
-    ("CU-NO-ONE-SAID", "No one said the binder was missing.", "CHECKLIST_UNAVAILABLE", "SUPPORTS", None, "CERTIFIES"),
-    ("CU-NOBODY-CLAIMED", "Nobody claimed the checklist was available.", "CHECKLIST_UNAVAILABLE", "CONTRADICTS", None, "CERTIFIES"),
-    ("SC-NO-ONE-REPORTED", "No one reported that the colleague was absent.", "STAFFING_CONSTRAINTS", "SUPPORTS", None, "CERTIFIES"),
+    # Quantifier over a reporting verb: a denied report withholds the complement.
+    # REVERSED 2026-11-02: nobody saying X is an absence of evidence, not support for X.
+    ("CU-NO-ONE-SAID", "No one said the binder was missing.", "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # REVERSED 2026-11-02: a denied claim about availability does not show unavailability.
+    ("CU-NOBODY-CLAIMED", "Nobody claimed the checklist was available.", "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # REVERSED 2026-11-02: no report of absence is silence, not evidence of absence.
+    ("SC-NO-ONE-REPORTED", "No one reported that the colleague was absent.", "STAFFING_CONSTRAINTS", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
     # --- true negations: the clause containing the cue is negated -------------
     ("TP-AUX-PLAIN", "We did not have enough time to review every open item.",
      "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
@@ -86,8 +96,10 @@ CORPUS = [
     # --- non-negations: a negation token appears, the cue still stands --------
     ("CU-CONTRAST-ITEM", "The binder was missing, not the checklist.",
      "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+    # REVERSED 2026-11-02: same sentence as CU-NO-ONE-SAID, kept as the matrix-form
+    # spelling of it; the denied report withholds.
     ("CU-MATRIX-NO-ONE", "No one said the binder was missing.",
-     "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
     ("CU-WEATHER-WHEN", "It was not raining when the binder was missing.",
      "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
     # REVERSED 2026-11-02. This row pinned a denied *evidential* verb as certifying
@@ -97,8 +109,10 @@ CORPUS = [
     # denying a *speech act* still certifies, and those rows below are unchanged.
     ("CU-MATRIX-CONFIRM", "No one could confirm that the checklist was unavailable.",
      "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # REVERSED 2026-11-02: a bare "no <noun>" subject is the same none-quantifier
+    # as "no one"; nobody reporting it is not evidence for it.
     ("CU-MATRIX-SUPERVISOR", "No supervisor said the binder was missing.",
-     "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
     ("CU-QUOTED-NO", "'No,' the auditor said, 'the binder was missing.'",
      "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
     ("CU-AUX-TO-GUESS", "The staff did not have to guess whether the checklist "
@@ -113,10 +127,15 @@ CORPUS = [
      "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
     ("CU-CONTRAST-OPPOSITE", "The checklist opened normally, not the binder.",
      "CHECKLIST_UNAVAILABLE", Stance.CONTRADICTS, None, CERTIFIES),
+    # REVERSED 2026-11-02: "never claimed" scopes over the report, so the complement
+    # (checklist available) is not asserted and cannot be read as a contradiction.
     ("CU-MATRIX-NEVER-CLAIMED", "We never claimed the checklist was available.",
-     "CHECKLIST_UNAVAILABLE", Stance.CONTRADICTS, None, CERTIFIES),
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # REVERSED 2026-11-02: "did not say" scopes over "the binder was at the desk"; the
+    # corpus intent was the complement's presence, and that presence was denied, not
+    # asserted — so the CU direction is not certified either way.
     ("CU-MATRIX-DID-NOT-SAY", "The auditor did not say the binder was at the desk.",
-     "CHECKLIST_UNAVAILABLE", Stance.CONTRADICTS, None, CERTIFIES),
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
     # A negation inside the NEUTRAL cue's own fixed wording is not a negation of
     # that cue; the neutral row must still be certified.
     ("CU-NEUTRAL-OWN-NOT", "The note does not address checklist availability.",
@@ -135,14 +154,16 @@ CORPUS = [
     ("TP-CONTRAST-BUT-NOT", "There was enough time to review every open item, "
      "but not for the checklist.",
      "TIME_PRESSURE", Stance.CONTRADICTS, None, CERTIFIES),
+    # REVERSED 2026-11-02: no one attributing the cause is not evidence for the cause.
     ("TP-MATRIX-NO-ONE-SAID", "No one said time pressure caused the miss.",
-     "TIME_PRESSURE", Stance.SUPPORTS, None, CERTIFIES),
+     "TIME_PRESSURE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
     ("PMS-LEADING-CUE", "The system timed out, not the printer.",
      "PMS_SYSTEM_ISSUE", Stance.SUPPORTS, None, CERTIFIES),
     ("PMS-TRAILING-NOT-ONLY", "The system was unavailable, not only slow.",
      "PMS_SYSTEM_ISSUE", Stance.SUPPORTS, None, CERTIFIES),
+    # REVERSED 2026-11-02: no report of an outage is silence about the outage.
     ("PMS-MATRIX-NO-ONE-REPORTED", "No one reported that the system was unavailable.",
-     "PMS_SYSTEM_ISSUE", Stance.SUPPORTS, None, CERTIFIES),
+     "PMS_SYSTEM_ISSUE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
     ("PMS-MATRIX-NOTHING-SAYS", "Nothing in the notes says the system worked normally.",
      "PMS_SYSTEM_ISSUE", Stance.CONTRADICTS, None, CERTIFIES),
     ("PMS-AUX-TO-BE-TOLD", "The staff did not have to be told twice: the system "
@@ -161,12 +182,12 @@ CORPUS = [
 # xfails: when the guard learns quantifier negation they XPASS and fail, which is
 # the signal to delete the marker rather than let the gap go quiet.
 _KNOWN_UNFIXED: dict[str, str] = {}
+# (empty: every row below is asserted directly. The gate flags an empty reason map as
+# an inert xfail site, which is correct -- a marker that covers no row is a lie.)
 
 _CASES = [
     pytest.param(sentence, hypothesis_id, expected_relation, expected_reason,
-                 kind, id=case_id,
-                 marks=(pytest.mark.xfail(strict=True, reason=_KNOWN_UNFIXED[case_id])
-                        if case_id in _KNOWN_UNFIXED else ()))
+                 kind, id=case_id)
     for case_id, sentence, hypothesis_id, expected_relation, expected_reason, kind
     in CORPUS
 ]
