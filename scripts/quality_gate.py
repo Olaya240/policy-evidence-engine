@@ -283,7 +283,14 @@ def _recorded_digests() -> dict[str, str] | None:
 
 
 def check_refinement_freshness(_fast: bool) -> Result:
-    """Recompute the digests the refinement test records, and compare."""
+    """Recompute the recorded digests *and* regenerate the table from Coq.
+
+    The digest handshake alone is a weaker check than it looks: it compares two hashes
+    that both live in the same commit, so editing `generate_table.v` and re-recording
+    its digest certifies a table nobody regenerated. This check therefore rebuilds the
+    table from source in a throwaway copy and compares bytes with the committed
+    artifact. The digests stay as a fast, readable first line; the rebuild is the check.
+    """
     recorded = _recorded_digests()
     if not recorded:
         return bad(
@@ -305,13 +312,65 @@ def check_refinement_freshness(_fast: bool) -> Result:
         if actual != expected:
             stale.append(f"{name}: recorded {expected}, actual {actual}")
 
+    regenerated, detail = _regenerate_table()
+    rows.append(f"    rebuild: {detail}")
+    if not regenerated:
+        stale.append(f"the table does not rebuild from source: {detail}")
+
     if stale:
         return bad(
-            f"{len(stale)} of {len(recorded)} recorded digests are stale",
+            f"{len(stale)} problem(s) with the refinement boundary",
             *rows,
             f"    regenerate: {_REGENERATE}",
         )
-    return ok(f"{len(recorded)} of {len(recorded)} recorded digests match", *rows)
+    return ok("2 of 2 recorded digests match and the table rebuilds byte-identically", *rows)
+
+
+def _regenerate_table() -> tuple[bool, str]:
+    """Rebuild `decision-table.out` from `generate_table.v` in a copy and compare bytes.
+
+    A copy, not the working tree: a check that repairs the artifact it is checking can
+    never fail twice. `coqc` writes the artifact through a `Redirect`, so the command is
+    the one the refinement test documents.
+    """
+    artifact = CT3 / "refinement" / "decision-table.out"
+    source_dir = CT3 / "refinement"
+    if not artifact.is_file() or not (source_dir / "generate_table.v").is_file():
+        return False, "generate_table.v or decision-table.out is missing"
+
+    with tempfile.TemporaryDirectory(prefix="refinement-") as directory:
+        copy_root = Path(directory) / "ct3"
+        shutil.copytree(CT3, copy_root, ignore=shutil.ignore_patterns("*.vo", "*.glob", "*.vok", "*.vos", "*.aux"))
+        # `generate_table.v` imports DecisionTable, and build products are not copied,
+        # so the dependency is compiled in the copy first. Compiling it here rather than
+        # reusing the tree's `.vo` is deliberate: a stale object file would let a broken
+        # source build, which is the failure this check exists to catch.
+        dependency = subprocess.run(
+            ["coqc", "DecisionTable.v"],
+            cwd=copy_root,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if dependency.returncode != 0:
+            tail = " | ".join((dependency.stdout + dependency.stderr).strip().splitlines()[-2:])
+            return False, f"DecisionTable.v did not compile: {tail}"
+        build = subprocess.run(
+            ["coqc", "-Q", "..", "", "generate_table.v"],
+            cwd=copy_root / "refinement",
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if build.returncode != 0:
+            tail = " | ".join((build.stdout + build.stderr).strip().splitlines()[-2:])
+            return False, f"coqc failed: {tail}"
+        produced = copy_root / "refinement" / "decision-table.out"
+        if not produced.is_file():
+            return False, "coqc produced no decision-table.out"
+        if produced.read_bytes() != artifact.read_bytes():
+            return False, "regenerated table differs from the committed artifact"
+    return True, "coqc regenerated decision-table.out byte-identically"
 
 
 # --------------------------------------------------------------------------- #
@@ -326,10 +385,51 @@ def _count(text: str, word: str) -> int:
     return int(match.group(1)) if match else 0
 
 
+_CONSTANT_TRUE = lambda node: isinstance(node, ast.Constant) and bool(node.value)
+
+
+def _vacuous_tests(root: Path) -> list[str]:
+    """Test functions whose body cannot fail: `pass`, or `assert <literal true>`.
+
+    Narrow on purpose. A test may assert inside a helper, so "no `assert` in this
+    function" is not evidence of a vacuous test and using it would flag honest tests.
+    A body that is *only* `pass`, or *only* `assert True`, cannot check anything, and
+    a count of passing tests cannot tell it apart from a real one — which is the attack
+    this exists to catch.
+    """
+    findings: list[str] = []
+    for path in sorted(root.rglob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not node.name.startswith("test_"):
+                continue
+            body = [statement for statement in node.body
+                    if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant))]
+            if not body:
+                findings.append(f"{path.relative_to(ROOT)}:{node.lineno}: {node.name}() has an empty body")
+                continue
+            if len(body) == 1:
+                only = body[0]
+                if isinstance(only, ast.Pass):
+                    findings.append(f"{path.relative_to(ROOT)}:{node.lineno}: {node.name}() is `pass`")
+                elif isinstance(only, ast.Assert) and _CONSTANT_TRUE(only.test):
+                    findings.append(f"{path.relative_to(ROOT)}:{node.lineno}: {node.name}() is `assert <literal true>`")
+    return findings
+
+
 def check_suite(fast: bool) -> Result:
     """The whole pytest suite, from `backend/`, with the venv that is running this."""
     if fast:
         return skipped("--fast: the full suite is the slowest check; run without --fast")
+
+    vacuous = _vacuous_tests(BACKEND / "tests")
+    if vacuous:
+        return bad(
+            f"{len(vacuous)} test function(s) cannot fail, so their passes are not evidence",
+            *vacuous[:20],
+        )
 
     env = dict(os.environ, PYTHONPATH=".", PYTHONDONTWRITEBYTECODE="1")
     started = time.monotonic()
@@ -601,19 +701,17 @@ _MUTATION_HARNESS = CT3 / "audit" / "measure_mutations.py"
 
 
 def check_mutation_floor(fast: bool) -> Result:
-    """Run the mutation harness in `--fast` mode, if it has one; otherwise SKIP."""
+    """Run the harness's fast sample and require every sampled mutant to be killed.
+
+    A sample is not a score: the number of controls left outside it is printed with the
+    result, and `SURVIVED`, `NOT_APPLIED` and `HUNG` are all failures. `NOT_APPLIED` in
+    particular means the harness substring no longer exists — the measurement is stale
+    and must not be reported as a pass.
+    """
     if not _MUTATION_HARNESS.is_file():
         return skipped(f"{_MUTATION_HARNESS.relative_to(ROOT)} is absent; mutation score not measured")
-
-    source = _MUTATION_HARNESS.read_text(encoding="utf-8", errors="replace")
-    if "--fast" not in source:
-        return skipped(
-            "ct3/audit/measure_mutations.py accepts no arguments (no --fast mode);"
-            " the full harness re-runs the suite once per mutant, which is outside a gate"
-            " budget. Mutation score NOT measured -- this is a skip, not a pass"
-        )
     if fast:
-        return skipped("--fast: mutation harness is slow even in --fast mode")
+        return skipped("--fast: mutation sample not run (requested)")
 
     started = time.monotonic()
     proc = subprocess.run(
@@ -621,13 +719,25 @@ def check_mutation_floor(fast: bool) -> Result:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=1800,
     )
     elapsed = time.monotonic() - started
-    tail = (proc.stdout + proc.stderr).strip().splitlines()[-6:]
-    if proc.returncode != 0:
-        return bad(f"mutation harness exited {proc.returncode} after {elapsed:.1f}s", *tail)
-    return ok(f"mutation harness exited 0 in {elapsed:.1f}s", *tail)
+    output = proc.stdout + proc.stderr
+    killed = re.search(r"kill-rate (\d+)/(\d+)", output)
+    outside = re.search(r"not-covered (\d+) of (\d+)", output)
+    if killed is None or outside is None:
+        return bad(f"mutation harness produced no kill-rate after {elapsed:.1f}s",
+                   *output.strip().splitlines()[-4:])
+
+    killed_count, sampled = int(killed.group(1)), int(killed.group(2))
+    outside_count, total = int(outside.group(1)), int(outside.group(2))
+    survivors = [line for line in output.splitlines() if line.startswith(("SURVIVOR:", "STALE:", "HUNG:"))]
+    detail = (f"{killed_count}/{sampled} sampled mutants killed in {elapsed:.1f}s;"
+              f" {outside_count} of {total} controls are outside the sample")
+
+    if proc.returncode != 0 or killed_count != sampled or sampled == 0:
+        return bad(detail + " -- mutation floor NOT met", *survivors)
+    return ok(detail)
 
 
 # --------------------------------------------------------------------------- #

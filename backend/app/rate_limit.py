@@ -115,6 +115,18 @@ class TokenBucketRateLimiter:
         self._buckets: dict[str, _Bucket] = {}
         self._lock = threading.Lock()
 
+    def reset(self) -> None:
+        """Forget every bucket (tests only).
+
+        The limiter is process-global, so a suite that makes thousands of API calls
+        drains it in whichever minute it happens to be running. The suite then depends
+        on wall-clock speed: two runs of identical code disagree, and the test that
+        fails is whichever one landed on the empty bucket. Tests reset between cases;
+        a live process never calls this.
+        """
+        with self._lock:
+            self._buckets.clear()
+
     @property
     def limit(self) -> int:
         return self._limit

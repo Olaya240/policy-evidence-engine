@@ -75,8 +75,8 @@ MUTATIONS = [
     ),
     (
         "app/semantic_guard.py",
-        "            or _NEGATED_FRAME.search(final_clause) is not None\n",
-        "",
+        "    if (_NEGATED_FRAME.search(final_clause) is not None",
+        "    if (False and _NEGATED_FRAME.search(final_clause) is not None",
         "negated propositional frame ('not true that')",
     ),
     (
@@ -157,7 +157,63 @@ MUTATIONS = [
         "    return False",
         "hedge frame ('perhaps the X was Y')",
     ),
+    # --- attribution surface -------------------------------------------------
+    (
+        "app/evidence_frames.py",
+        "        return (self.polarity == POLARITY_NEGATED\n"
+        "                and self.verb_class in (EVIDENTIAL, SPEECH_ACT))",
+        "        return False",
+        "any negative matrix frame withholds its complement",
+    ),
+    (
+        "app/semantic_guard.py",
+        "    if scope is not None and scope.conditional_scope_at(start, end):\n"
+        "        return Modality.CONDITIONAL",
+        "    if False:\n        return Modality.CONDITIONAL",
+        "conditional scope at the cue (clause-level operator)",
+    ),
+    (
+        "app/decision_table.py",
+        "    return score(support_groups, contradiction_groups + disputed_contradiction)",
+        "    return score(support_groups, contradiction_groups)",
+        "truth interval lower bound is reported at all",
+    ),
 ]
+
+# `--fast` maps a mutation to the tests that are supposed to kill it. Matching is by the
+# description, not by list position, so inserting a mutation cannot silently retarget a
+# fast run at the wrong file. A mutation with no entry here is reported as NOT COVERED,
+# never as KILLED: the point of the mode is a cheap, honest sample, not a green number.
+FAST_SUBSET = {
+    "two independent groups required for SUPPORTED": (
+        "tests/test_decision_table_slice9_labels.py",
+        "tests/test_decision_table_slice9_math.py",
+    ),
+    "restricted records excluded from reads": (
+        "tests/test_api.py",
+        "tests/test_access_slice15.py",
+    ),
+    "quote grounding against the named record": (
+        "tests/test_engine_slice6_contracts.py",
+        "tests/test_attack_surfaces_engine.py",
+    ),
+    "negated propositional frame ('not true that')": (
+        "tests/test_attack_surfaces_guard_reading.py",
+        "tests/test_semantic_guard_negation_corpus.py",
+    ),
+    "any negative matrix frame withholds its complement": (
+        "tests/test_evidence_frames.py",
+        "tests/test_semantic_guard_negation_corpus.py",
+    ),
+    "conditional scope at the cue (clause-level operator)": (
+        "tests/test_scope_layer.py",
+        "tests/test_semantic_guard_mood.py",
+    ),
+    "truth interval lower bound is reported at all": (
+        "tests/test_truth_interval.py",
+        "tests/test_interval_report_refinement.py",
+    ),
+}
 
 
 def run_suite(cwd: Path) -> tuple[bool, str, str]:
@@ -182,6 +238,24 @@ def run_suite(cwd: Path) -> tuple[bool, str, str]:
     return result.returncode == 0, tail[0], kind
 
 
+def run_tests(cwd: Path, tests: tuple[str, ...]) -> tuple[bool, str, str]:
+    """Run only ``tests`` against a copy; same kill semantics as ``run_suite``."""
+    try:
+        result = subprocess.run(
+            [PYTHON, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", *tests],
+            cwd=cwd,
+            env={"PYTHONPATH": ".:../scripts", "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            timeout=SUITE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"timeout after {SUITE_TIMEOUT_SECONDS}s", "timeout"
+    tail = [line for line in result.stdout.strip().splitlines() if line.strip()][-1:] or [""]
+    kind = "failed" if " failed" in tail[0] else ("error" if "error" in tail[0] else "other")
+    return result.returncode == 0, tail[0], kind
+
+
 def build_copy(source_root: Path, destination: Path) -> Path:
     """Copy the parts the suite needs from ``source_root`` and return the backend dir."""
     for name in NEEDED:
@@ -193,7 +267,72 @@ def build_copy(source_root: Path, destination: Path) -> Path:
     return destination / "backend"
 
 
-def main() -> int:
+def run_fast() -> int:
+    """A cheap, honest sample: one mutant per control family, only its covering tests.
+
+    The sample is deliberately small enough for a gate budget and deliberately not a
+    substitute for the full sweep. Three outcomes are failures here, not findings:
+    ``SURVIVED`` (a control nobody tests), ``NOT_APPLIED`` (the harness substring no
+    longer exists, so the measurement is stale) and ``HUNG`` (a termination guard
+    removed). Only ``KILLED`` counts, and the number of mutants left outside the sample
+    is printed so a reader cannot mistake this for the whole score.
+    """
+    selected = [mutation for mutation in MUTATIONS if mutation[3] in FAST_SUBSET]
+    if not selected:
+        print("NOT COVERED: no mutation has a --fast mapping; nothing measured")
+        return 1
+    tests = tuple(sorted({test for mutation in selected for test in FAST_SUBSET[mutation[3]]}))
+
+    results = []
+    with tempfile.TemporaryDirectory(prefix="mutation-fast-") as directory:
+        snapshot_root = Path(directory)
+        backend = build_copy(REPO, snapshot_root)
+        green, detail, _ = run_tests(backend, tests)
+        print(f"[control] {'GREEN' if green else 'RED':5} {detail}", flush=True)
+        if not green:
+            print("CONTROL FAILED: a fresh copy is red, so no mutation below means anything")
+            return 1
+
+        for index, (relative, old, new, description) in enumerate(selected, start=1):
+            with tempfile.TemporaryDirectory(prefix=f"fast{index}-") as directory:
+                copy_root = Path(directory)
+                copy_backend = build_copy(snapshot_root, copy_root)
+                target = copy_backend / relative
+                text = target.read_text()
+                if text.count(old) != 1:
+                    results.append((description, "NOT_APPLIED"))
+                    print(f"[{index}/{len(selected)}] NOT_APPLIED {description}", flush=True)
+                    continue
+                target.write_text(text.replace(old, new))
+                kept, detail, kind = run_tests(copy_backend, tests)
+                status = ("SURVIVED" if kept
+                          else "KILLED" if kind == "failed"
+                          else "HUNG" if kind == "timeout"
+                          else "KILLED_BY_ERROR")
+                results.append((description, status))
+                print(f"[{index}/{len(selected)}] {status:15} {description} | {detail}", flush=True)
+
+    killed = sum(1 for _, status in results if status == "KILLED")
+    survived = [d for d, s in results if s == "SURVIVED"]
+    stale = [d for d, s in results if s == "NOT_APPLIED"]
+    hung = [d for d, s in results if s == "HUNG"]
+    errored = [d for d, s in results if s == "KILLED_BY_ERROR"]
+    print(
+        f"\napplied {len(results)} killed {killed} survived {len(survived)}"
+        f" not-applied {len(stale)} hung {len(hung)} killed-by-error {len(errored)}"
+    )
+    print(f"kill-rate {killed}/{len(results)} ({100.0 * killed / len(results):.1f}%)")
+    print(f"not-covered {len(MUTATIONS) - len(selected)} of {len(MUTATIONS)} mutants are outside --fast")
+    for label, group in (("SURVIVOR", survived), ("STALE", stale), ("HUNG", hung)):
+        for description in group:
+            print(f"{label}: {description}")
+    return 0 if killed == len(results) else 1
+
+
+def main(fast: bool = False) -> int:
+    if fast:
+        return run_fast()
+
     records = []
 
     with tempfile.TemporaryDirectory(prefix="mutation-audit-") as directory:
@@ -265,4 +404,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(fast="--fast" in sys.argv[1:]))

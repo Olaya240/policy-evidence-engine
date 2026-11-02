@@ -69,9 +69,10 @@ on the independently written one.
   Each is one attack in `tests/test_gate_integrity.py`; each will XPASS the moment
   the corresponding check is strengthened.
 
-The gate therefore still reports **NOT CERTIFIED**, and it is honest about why: the
-mutation floor is still skipped (no `--fast` mode) and the three holes above are
-debt with a name.
+**Superseded by `CERTIFICATION.md`:** the mutation floor now runs (`--fast`, 7/7
+killed), two of the three holes are closed, and the gate returns **7 PASS, 0 FAIL,
+0 SKIPPED, exit 0**. The third hole (a 503 quoting a documented detail on an
+arbitrary route) is still open and still a strict xfail.
 
 ## What is still not fixed
 

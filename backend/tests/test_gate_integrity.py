@@ -237,9 +237,6 @@ def test_edited_generate_table_is_a_stale_digest(tree: Path) -> None:
 
 
 # Known defect (gate, not test): see ct3/audit/GATE-INTEGRITY.md.
-@pytest.mark.xfail(strict=True, reason=(
-    "gate hole: check 3 compares recorded digests with recomputed ones, so re-recording both certifies a table nobody regenerated"
-))
 # KNOWN GATE HOLE (not fixed this turn). These three tests are requirements the
 # gate does not meet yet: a re-recorded digest certifies a table that was never
 # regenerated, a test body with no assertion counts as a pass, and a 503 whose
@@ -295,9 +292,6 @@ def test_rerecorded_digest_certifies_a_table_that_was_not_regenerated(tree: Path
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "gate hole: check 4 counts passes, so a test with no assertion is a pass; only mutation or coverage can catch it"
-))
 def test_assertion_free_tests_are_counted_as_passes(tree: Path) -> None:
     """GATE MISS (suite): a test body that asserts nothing is a `passed`.
 
