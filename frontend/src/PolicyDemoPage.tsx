@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-
-// ── Types ──────────────────────────────────────────────────────────────────
+import {
+  extractDemoError,
+  POLICY_DEMO_PROPOSAL_LABEL,
+  STATIC_VISUAL_NOTICE,
+} from "./auditParsers";
 
 type ProvenanceDetail = {
   side: "OLDER" | "NEWER";
@@ -41,6 +44,13 @@ type ScenarioMeta = {
   default_challenge_department: string;
 };
 
+type SessionCreatedResponse = {
+  session_id: string;
+  scenario_id: string;
+  created_at_iso?: string;
+  created_at?: string;
+};
+
 type ChallengeResult = {
   challenge: {
     challenge_id: string;
@@ -55,6 +65,10 @@ type ChallengeResult = {
     finding: string;
     older_scope_state: string;
     newer_scope_state: string;
+    older_departments?: string[];
+    newer_departments?: string[];
+    dependency_count?: number;
+    text_mention?: boolean;
   };
   contract_enforcement: {
     one_sided_change_rejected: boolean;
@@ -102,46 +116,284 @@ const SCENARIO_DEPARTMENTS: Record<string, string[]> = {
   lounge_access: ["VALET", "SECURITY", "BANQUETS"],
 };
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+const DEFAULT_SCENARIO_LIST: ScenarioMeta[] = [
+  {
+    id: "scheduling",
+    title: "Scheduling Notice — Compatible Change",
+    category: "Operations & Scheduling",
+    relation_type: "COMPATIBLE_CHANGE",
+    description: "Shift-change notification timeline updated from 48h to 24h across property operations.",
+    default_challenge_department: "HOUSEKEEPING",
+  },
+  {
+    id: "uniform_grooming",
+    title: "Uniform & Grooming — Contradiction",
+    category: "Guest Relations & Standards",
+    relation_type: "CONTRADICTION",
+    description:
+      "Incompatible mandatory emblem placement rules (left lapel vs. right lapel) for Guest Relations Ambassadors.",
+    default_challenge_department: "CONCIERGE",
+  },
+  {
+    id: "lounge_access",
+    title: "Executive Lounge Access — Scope / Time Difference",
+    category: "Loyalty & Access",
+    relation_type: "SCOPE_OR_TIME_DIFFERENCE",
+    description:
+      "Disjoint lounge access standards across distinct property collections and non-overlapping effective dates.",
+    default_challenge_department: "VALET",
+  },
+];
+
+const SAM_VISUAL_EVIDENCE: Record<
+  string,
+  {
+    evidenceId: string;
+    caption: string;
+    maskRegionLabel: string;
+    iouConfidence: string;
+    bboxCoords: string;
+    olderVisualNote: string;
+    newerVisualNote: string;
+    policyTieIn: string;
+    v1Highlight: string;
+    v2Highlight: string;
+  }
+> = {
+  scheduling: {
+    evidenceId: "VIS-SAM-301 · ROSTER TERMINAL CAPTURE",
+    caption: "Back-of-House Digital Shift Notice Board (Terminal B)",
+    maskRegionLabel: "Illustrative Mask #01: Shift Lock Banner & Missing Scope Tag",
+    iouConfidence: "0.964 IoU",
+    bboxCoords: "[x: 42, y: 18, w: 310, h: 74]",
+    olderVisualNote: "v1 Capture: Displays 48-hour lock notice scoped to Front Desk.",
+    newerVisualNote: "v2 Capture: Displays 24-hour notice header with blank scope tag.",
+    policyTieIn:
+      "Static mask illustration marks the roster header; it is not a model result. The policy demo API separately returns department applicability as UNGROUNDED.",
+    v1Highlight: "LOCK WINDOW: 48 HOURS",
+    v2Highlight: "LOCK WINDOW: 24 HOURS",
+  },
+  uniform_grooming: {
+    evidenceId: "VIS-SAM-302 · AMBASSADOR BLAZER SPEC DIAGRAM",
+    caption: "Guest Relations Standard Blazer — Lapel Pin Placement Audit",
+    maskRegionLabel: "Illustrative Mask #02: Left vs. Right Lapel Emblem Region",
+    iouConfidence: "0.982 IoU",
+    bboxCoords: "[x: 118, y: 64, w: 96, h: 92]",
+    olderVisualNote: "v1 Spec Diagram: Static illustration marks the LEFT lapel (1.5 cm above stitch).",
+    newerVisualNote: "v2 Spec Diagram: Static illustration marks the RIGHT lapel (diagram only).",
+    policyTieIn:
+      "Static mask illustration marks lapel regions in the v1 and v2 diagrams; it does not prove a spatial contradiction. The policy demo API supplies the proposal and review status.",
+    v1Highlight: "LEFT LAPEL CREST [x:118]",
+    v2Highlight: "RIGHT LAPEL CREST [x:264]",
+  },
+  lounge_access: {
+    evidenceId: "VIS-SAM-303 · EXECUTIVE LOUNGE KEYCARD READER",
+    caption: "Floor 14 Executive Lounge Access Reader & Tier Signage",
+    maskRegionLabel: "Illustrative Mask #03: Property Collection Plaque & Effective Date Window",
+    iouConfidence: "0.951 IoU",
+    bboxCoords: "[x: 78, y: 30, w: 245, h: 88]",
+    olderVisualNote: "v1 Signage: Heritage Wing plaque (2022–2024 window).",
+    newerVisualNote: "v2 Signage: Signature Tower plaque (2025–2028 window).",
+    policyTieIn:
+      "Static illustration marks property wing plaques and date stamps; it does not establish scope or time applicability. The policy demo API supplies its own proposal and uncertainty fields.",
+    v1Highlight: "HERITAGE WING (2022-24)",
+    v2Highlight: "SIGNATURE TOWER (2025-28)",
+  },
+};
+
+const EXPLICIT_DEMO_SCENARIOS: Record<string, ScenarioResult> = {
+  scheduling: {
+    comparison_id: "cmp-scheduling-001",
+    request_id: "req-demo-sched-01",
+    proposed_relation: "COMPATIBLE_CHANGE",
+    candidate_id: "cand-sched-v1-v2",
+    reasoning:
+      "v2 shortens shift notification from 48 hours to 24 hours; text offsets are verified locally, but department scope coverage requires human verification.",
+    status: "PROPOSAL_ONLY",
+    semantic_support: "NOT_VERIFIED",
+    human_review_required: true,
+    core_classification: "INCONCLUSIVE",
+    core_proposed_classification: "COMPATIBLE_CHANGE",
+    uncertainty_reasons: ["DEPARTMENT_SCOPE_UNGROUNDED", "SEMANTIC_ENTAILMENT_NOT_VERIFIED"],
+    official_policy_mutated: false,
+    impact_status: "INCONCLUSIVE",
+    scenario_id: "scheduling",
+    provenance_limitation_notice:
+      "Exact character offsets and SHA-256 hashes prove local substring presence only — never semantic correctness or department applicability.",
+    provenance_details: [
+      {
+        side: "OLDER",
+        passage_id: "p000001-sched-v1",
+        passage_ordinal: 1,
+        start_cp: 0,
+        end_cp: 89,
+        quote: "Supervisors must publish shift-change notices at least 48 hours before the affected roster begins.",
+        source_sha256: "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
+        verified_locally: true,
+      },
+      {
+        side: "NEWER",
+        passage_id: "p000001-sched-v2",
+        passage_ordinal: 1,
+        start_cp: 0,
+        end_cp: 89,
+        quote: "Supervisors must publish shift-change notices at least 24 hours before the affected roster begins.",
+        source_sha256: "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+        verified_locally: true,
+      },
+    ],
+  },
+  uniform_grooming: {
+    comparison_id: "cmp-uniform-002",
+    request_id: "req-demo-unif-02",
+    proposed_relation: "CONTRADICTION",
+    candidate_id: "cand-unif-v1-v2",
+    reasoning:
+      "v1 mandates placement of the Grand Luminary emblem on the left lapel, whereas v2 mandates the right lapel without an exception clause.",
+    status: "PROPOSAL_ONLY",
+    semantic_support: "NOT_VERIFIED",
+    human_review_required: true,
+    core_classification: "INCONCLUSIVE",
+    core_proposed_classification: "CONTRADICTION",
+    uncertainty_reasons: ["SCOPE_APPLICABILITY_UNVERIFIED", "HUMAN_REVIEW_GATE_ACTIVE"],
+    official_policy_mutated: false,
+    impact_status: "INCONCLUSIVE",
+    scenario_id: "uniform_grooming",
+    provenance_limitation_notice:
+      "Exact character offsets and SHA-256 hashes prove local substring presence only — never semantic correctness or department applicability.",
+    provenance_details: [
+      {
+        side: "OLDER",
+        passage_id: "p000002-unif-v1",
+        passage_ordinal: 1,
+        start_cp: 12,
+        end_cp: 108,
+        quote: "Guest Relations Ambassadors must wear the brass property emblem centered on the left blazer lapel.",
+        source_sha256: "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+        verified_locally: true,
+      },
+      {
+        side: "NEWER",
+        passage_id: "p000002-unif-v2",
+        passage_ordinal: 1,
+        start_cp: 12,
+        end_cp: 109,
+        quote: "Guest Relations Ambassadors must wear the brass property emblem centered on the right blazer lapel.",
+        source_sha256: "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+        verified_locally: true,
+      },
+    ],
+  },
+  lounge_access: {
+    comparison_id: "cmp-lounge-003",
+    request_id: "req-demo-lounge-03",
+    proposed_relation: "SCOPE_OR_TIME_DIFFERENCE",
+    candidate_id: "cand-lounge-v1-v2",
+    reasoning:
+      "v1 and v2 govern non-overlapping effective date windows and distinct property wings; direct conflict cannot be established without scope grounding.",
+    status: "PROPOSAL_ONLY",
+    semantic_support: "NOT_VERIFIED",
+    human_review_required: true,
+    core_classification: "INCONCLUSIVE",
+    core_proposed_classification: "SCOPE_OR_TIME_DIFFERENCE",
+    uncertainty_reasons: ["NON_OVERLAPPING_EFFECTIVE_DATES", "DEPARTMENT_GROUNDING_ABSENT"],
+    official_policy_mutated: false,
+    impact_status: "INCONCLUSIVE",
+    scenario_id: "lounge_access",
+    provenance_limitation_notice:
+      "Exact character offsets and SHA-256 hashes prove local substring presence only — never semantic correctness or department applicability.",
+    provenance_details: [
+      {
+        side: "OLDER",
+        passage_id: "p000003-lounge-v1",
+        passage_ordinal: 1,
+        start_cp: 0,
+        end_cp: 95,
+        quote: "Heritage Wing Executive Lounge access is complimentary for Titanium guests between 06:00 and 22:00.",
+        source_sha256: "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+        verified_locally: true,
+      },
+      {
+        side: "NEWER",
+        passage_id: "p000003-lounge-v2",
+        passage_ordinal: 1,
+        start_cp: 0,
+        end_cp: 98,
+        quote: "Signature Tower Lounge access requires an active keycard endorsement after 20:00 for all guest tiers.",
+        source_sha256: "e7f6c011776e8db7cd330b54174fd76f7d0216b612387a5ffcfb81e6f0919683",
+        verified_locally: true,
+      },
+    ],
+  },
+};
+
+function normalizeDemoError(body: unknown, status: number): string {
+  return extractDemoError(body, status);
+}
 
 async function demoApi<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/demo-api${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/demo-api${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json", ...init?.headers },
+    });
+  } catch (err) {
+    throw new Error(
+      `Cannot reach Policy Demo API at 127.0.0.1:8083 (/demo-api${path}). Start policy_demo_api.py on port 8083 or explicitly enable Demo Fixture Mode. (${
+        (err as Error).message
+      })`
+    );
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || `Request failed (${res.status})`);
+    throw new Error(normalizeDemoError(body, res.status));
   }
   return res.json() as Promise<T>;
 }
 
-// ── Sub-components ─────────────────────────────────────────────────────────
-
-function Badge({ text, color = "green" }: { text: string; color?: "green" | "orange" | "muted" | "review" }) {
+function Badge({
+  text,
+  color = "green",
+}: {
+  text: string;
+  color?: "green" | "orange" | "muted" | "review" | "purple";
+}) {
   const bgMap: Record<string, string> = {
-    green: "#e1ede7",
-    orange: "#f4e8de",
-    muted: "#eeeee8",
-    review: "#f3ecdf",
+    green: "#e3f3eb",
+    orange: "#fcf0e4",
+    muted: "#f0f2f5",
+    review: "#fef6e6",
+    purple: "#f3e8ff",
   };
   const colorMap: Record<string, string> = {
-    green: "#285f4d",
-    orange: "#b45c37",
-    muted: "#777f78",
-    review: "#8a5c20",
+    green: "#16583e",
+    orange: "#b45309",
+    muted: "#475569",
+    review: "#92400e",
+    purple: "#6b21a8",
+  };
+  const borderMap: Record<string, string> = {
+    green: "#a7d9c0",
+    orange: "#fcd34d",
+    muted: "#cbd5e1",
+    review: "#fde68a",
+    purple: "#d8b4fe",
   };
   return (
     <span
       style={{
-        fontFamily: "ui-monospace,monospace",
-        fontSize: 9,
-        letterSpacing: "0.1em",
-        padding: "4px 7px",
+        fontFamily: "var(--mono)",
+        fontSize: 9.5,
+        letterSpacing: "0.08em",
+        padding: "4px 9px",
         background: bgMap[color],
         color: colorMap[color],
-        borderRadius: 2,
+        border: `1px solid ${borderMap[color]}`,
+        borderRadius: 4,
         display: "inline-block",
+        fontWeight: 700,
+        textTransform: "uppercase",
       }}
     >
       {text}
@@ -153,12 +405,14 @@ function SectionKicker({ children }: { children: React.ReactNode }) {
   return (
     <span
       style={{
-        fontFamily: "ui-monospace,monospace",
+        fontFamily: "var(--mono)",
         fontSize: 10,
-        letterSpacing: "0.12em",
-        color: "#758078",
+        letterSpacing: "0.14em",
+        color: "var(--ink-tertiary)",
         display: "block",
         marginBottom: 6,
+        fontWeight: 700,
+        textTransform: "uppercase",
       }}
     >
       {children}
@@ -168,15 +422,16 @@ function SectionKicker({ children }: { children: React.ReactNode }) {
 
 function SectionHeading({ num, title }: { num: string; title: string }) {
   return (
-    <div style={{ borderTop: "1px solid var(--line)", paddingTop: 28, marginTop: 44 }}>
+    <div style={{ borderTop: "1px solid var(--line)", paddingTop: 32, marginTop: 44, marginBottom: 18 }}>
       <SectionKicker>{num}</SectionKicker>
       <h2
         style={{
-          fontFamily: "Georgia,'Times New Roman',serif",
-          fontSize: 22,
-          fontWeight: 500,
-          margin: "6px 0 18px",
-          color: "#2c3832",
+          fontFamily: "Inter, Georgia, serif",
+          fontSize: 24,
+          fontWeight: 600,
+          margin: "4px 0 0",
+          color: "var(--ink)",
+          letterSpacing: "-0.02em",
         }}
       >
         {title}
@@ -185,13 +440,12 @@ function SectionHeading({ num, title }: { num: string; title: string }) {
   );
 }
 
-// ── Main Page ──────────────────────────────────────────────────────────────
-
 export default function PolicyDemoPage() {
-  const [scenarios, setScenarios] = useState<ScenarioMeta[]>([]);
+  const [scenarios, setScenarios] = useState<ScenarioMeta[]>(DEFAULT_SCENARIO_LIST);
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>("scheduling");
   const [scenario, setScenario] = useState<ScenarioResult | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionCreatedAtIso, setSessionCreatedAtIso] = useState<string | null>(null);
   const [selectedDept, setSelectedDept] = useState<string>("HOUSEKEEPING");
   const [historyEvents, setHistoryEvents] = useState<AuditTrailEvent[]>([]);
   const [challenge, setChallenge] = useState<ChallengeResult | null>(null);
@@ -200,47 +454,24 @@ export default function PolicyDemoPage() {
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
   const [challengeError, setChallengeError] = useState("");
+  const [showSamMask, setShowSamMask] = useState(true);
+  // P0.2: Never fall back silently — require explicit user selection for offline demo fixtures
+  const [explicitOfflineDemo, setExplicitOfflineDemo] = useState(false);
 
   const currentScenarioMeta = scenarios.find((s) => s.id === selectedScenarioId);
+  const visualEvidence = SAM_VISUAL_EVIDENCE[selectedScenarioId] || SAM_VISUAL_EVIDENCE.scheduling;
 
-  // Load scenarios allowlist on mount
   useEffect(() => {
+    if (explicitOfflineDemo) return;
     demoApi<ScenarioMeta[]>("/scenarios")
       .then((data) => {
         setScenarios(data);
       })
       .catch(() => {
-        // Fallback default list if API fails
-        setScenarios([
-          {
-            id: "scheduling",
-            title: "Scheduling Notice — Compatible Change",
-            category: "Operations & Scheduling",
-            relation_type: "COMPATIBLE_CHANGE",
-            description: "Shift-change notification timeline updated from 48h to 24h across property operations.",
-            default_challenge_department: "HOUSEKEEPING",
-          },
-          {
-            id: "uniform_grooming",
-            title: "Uniform & Grooming — Contradiction",
-            category: "Guest Relations & Standards",
-            relation_type: "CONTRADICTION",
-            description: "Incompatible mandatory emblem placement rules (left lapel vs. right lapel) for Guest Relations Ambassadors.",
-            default_challenge_department: "CONCIERGE",
-          },
-          {
-            id: "lounge_access",
-            title: "Executive Lounge Access — Scope / Time Difference",
-            category: "Loyalty & Access",
-            relation_type: "SCOPE_OR_TIME_DIFFERENCE",
-            description: "Disjoint lounge access standards across distinct property collections and non-overlapping effective dates.",
-            default_challenge_department: "VALET",
-          },
-        ]);
+        // Keep selector metadata available; actual scenario load will surface the error
       });
-  }, []);
+  }, [explicitOfflineDemo]);
 
-  // Load selected scenario and initialize in-memory session on scenario change
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -252,9 +483,18 @@ export default function PolicyDemoPage() {
     const depts = SCENARIO_DEPARTMENTS[selectedScenarioId] || ["HOUSEKEEPING"];
     setSelectedDept(depts[0]);
 
+    if (explicitOfflineDemo) {
+      const fixture = EXPLICIT_DEMO_SCENARIOS[selectedScenarioId] || EXPLICIT_DEMO_SCENARIOS.scheduling;
+      setScenario(fixture);
+      setSessionId("explicit-demo-session-8083");
+      setSessionCreatedAtIso(new Date().toISOString());
+      setLoading(false);
+      return;
+    }
+
     Promise.all([
       demoApi<ScenarioResult>(`/scenario?id=${selectedScenarioId}`),
-      demoApi<{ session_id: string; scenario_id: string; created_at: string }>("/session/new", {
+      demoApi<SessionCreatedResponse>("/session/new", {
         method: "POST",
         body: JSON.stringify({ scenario_id: selectedScenarioId }),
       }),
@@ -263,10 +503,14 @@ export default function PolicyDemoPage() {
         if (cancelled) return;
         setScenario(scenarioData);
         setSessionId(sessionData.session_id);
+        setSessionCreatedAtIso(sessionData.created_at_iso ?? sessionData.created_at ?? new Date().toISOString());
         setError("");
       })
       .catch((e: Error) => {
         if (cancelled) return;
+        // P0.2: No silent fallback! Clear scenario and display visible error message
+        setScenario(null);
+        setSessionId(null);
         setError(e.message);
       })
       .finally(() => {
@@ -276,12 +520,85 @@ export default function PolicyDemoPage() {
     return () => {
       cancelled = true;
     };
-  }, [selectedScenarioId]);
+  }, [selectedScenarioId, explicitOfflineDemo]);
 
   const runChallenge = useCallback(async () => {
     if (!scenario) return;
     setChallenging(true);
     setChallengeError("");
+
+    if (explicitOfflineDemo) {
+      const nextSeq = historyEvents.length + 1;
+      const syntheticChallenge: ChallengeResult = {
+        challenge: {
+          challenge_id: `chg-${selectedScenarioId}-${nextSeq}`,
+          target_department: selectedDept,
+          target_side: "OLDER_AND_NEWER",
+          target_passage_id: scenario.provenance_details[0]?.passage_id ?? "p000001",
+          description: `Reviewer challenged whether ${selectedDept} is grounded in policy scope metadata.`,
+        },
+        applicability_audit: {
+          department_id: selectedDept,
+          applicability_status: "UNGROUNDED",
+          finding: `Scope metadata does not establish verified applicability for ${selectedDept}.`,
+          older_scope_state: "EXCERPT_ONLY",
+          newer_scope_state: "UNVERIFIED_SCOPE",
+        },
+        contract_enforcement: {
+          one_sided_change_rejected: true,
+          explanation:
+            "Unverified candidate proposals cannot mutate official policy or override missing department scope grounding.",
+        },
+        recomputed_proposal: {
+          candidate_id: scenario.candidate_id,
+          proposed_relation: "INCONCLUSIVE",
+          status: "PROPOSAL_ONLY",
+          semantic_support: "NOT_VERIFIED",
+          human_review_required: true,
+          abstain: true,
+          citations_count: scenario.provenance_details.length,
+          uncertainty_reasons: [
+            `DEPARTMENT_${selectedDept}_UNGROUNDED`,
+            "APPLICABILITY_AUDIT_FAILED",
+            "HUMAN_REVIEW_REQUIRED",
+          ],
+        },
+        recomputed_core_result: {
+          classification: "INCONCLUSIVE",
+          proposed_classification: scenario.proposed_relation,
+          human_review_required: true,
+          official_policy_mutated: false,
+          uncertainty_reasons: [
+            `DEPARTMENT_${selectedDept}_UNGROUNDED`,
+            "QUOTE_PROVENANCE_ONLY",
+            "SEMANTIC_SUPPORT_NOT_VERIFIED",
+          ],
+          impact_status: "INCONCLUSIVE",
+        },
+        differentiator_takeaway: `Challenging ${selectedDept} applicability exposes ungrounded scope assumptions: the engine abstains and recomputes the proposal from ${scenario.proposed_relation} to INCONCLUSIVE while preserving immutable audit history.`,
+      };
+      setChallenge(syntheticChallenge);
+      setHistoryEvents((prev) => [
+        ...prev,
+        {
+          sequence_number: nextSeq,
+          timestamp_iso: new Date().toISOString(),
+          scenario_id: selectedScenarioId,
+          target_department: selectedDept,
+          target_side: "OLDER_AND_NEWER",
+          applicability_status: "UNGROUNDED",
+          initial_relation: scenario.proposed_relation,
+          recomputed_relation: "INCONCLUSIVE",
+          core_classification: "INCONCLUSIVE",
+          uncertainty_reasons: syntheticChallenge.recomputed_core_result.uncertainty_reasons,
+          contract_enforced: true,
+          summary: `Department ${selectedDept} applicability challenged; proposal recomputed from ${scenario.proposed_relation} to INCONCLUSIVE.`,
+        },
+      ]);
+      setChallenging(false);
+      return;
+    }
+
     try {
       const result = await demoApi<
         ChallengeResult & { session_id?: string; sequence_number?: number; history_count?: number }
@@ -296,30 +613,31 @@ export default function PolicyDemoPage() {
       setChallenge(result);
 
       if (sessionId) {
-        const historyData = await demoApi<{ events: AuditTrailEvent[] }>(
-          `/session/${sessionId}/history`
-        );
+        const historyData = await demoApi<{ events: AuditTrailEvent[] }>(`/session/${sessionId}/history`);
         setHistoryEvents(historyData.events);
       }
     } catch (e: unknown) {
+      // P0.2: Show visible error when challenge fails
       setChallengeError((e as Error).message);
     } finally {
       setChallenging(false);
     }
-  }, [scenario, selectedDept, selectedScenarioId, sessionId]);
+  }, [scenario, selectedDept, selectedScenarioId, sessionId, explicitOfflineDemo, historyEvents.length]);
 
   const startNewInvestigation = useCallback(async () => {
     if (!sessionId) return;
     setResetting(true);
     setChallengeError("");
     try {
-      await demoApi<{ session_id: string; scenario_id: string; event_count: number }>(
-        `/session/${sessionId}/reset`,
-        {
-          method: "POST",
-          body: JSON.stringify({ scenario_id: selectedScenarioId }),
-        }
-      );
+      if (!explicitOfflineDemo) {
+        await demoApi<{ session_id: string; scenario_id: string; event_count: number }>(
+          `/session/${sessionId}/reset`,
+          {
+            method: "POST",
+            body: JSON.stringify({ scenario_id: selectedScenarioId }),
+          }
+        );
+      }
       setChallenge(null);
       setHistoryEvents([]);
       const depts = SCENARIO_DEPARTMENTS[selectedScenarioId] || ["HOUSEKEEPING"];
@@ -329,63 +647,63 @@ export default function PolicyDemoPage() {
     } finally {
       setResetting(false);
     }
-  }, [sessionId, selectedScenarioId]);
-
-  // ── Layout constants ──────────────────────────────────────────────────────
+  }, [sessionId, selectedScenarioId, explicitOfflineDemo]);
 
   const card: React.CSSProperties = {
-    background: "#fbfaf6",
-    border: "1px solid #e1e1d9",
-    borderRadius: 3,
-    padding: "20px 22px",
+    background: "#ffffff",
+    border: "1px solid var(--line)",
+    borderRadius: 12,
+    padding: "24px 26px",
+    boxShadow: "var(--shadow-md)",
   };
 
   const labelStyle: React.CSSProperties = {
-    fontFamily: "ui-monospace,monospace",
-    fontSize: 9,
-    letterSpacing: "0.1em",
-    color: "#858c84",
+    fontFamily: "var(--mono)",
+    fontSize: 9.5,
+    letterSpacing: "0.12em",
+    color: "var(--ink-tertiary)",
     display: "block",
-    marginBottom: 4,
+    marginBottom: 5,
+    fontWeight: 700,
+    textTransform: "uppercase",
   };
 
   const valueStyle: React.CSSProperties = {
-    fontFamily: "Georgia,'Times New Roman',serif",
-    fontSize: 14,
-    color: "#27322f",
+    fontFamily: "Inter, sans-serif",
+    fontSize: 15,
+    fontWeight: 600,
+    color: "var(--ink)",
     margin: 0,
+    letterSpacing: "-0.01em",
   };
-
-  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="shell">
-      {/* ── Header (mirrors App.tsx topbar) ──────────────────────────────── */}
-      <header className="topbar">
+      <header className="topbar policy-topbar">
         <a className="brand" href="#" aria-label="Story Connect home">
           <span className="brand-mark">S</span>
-          <span>
-            STORY <i>CONNECT</i>
-          </span>
+          <div className="brand-text">
+            <strong>storyconnect</strong>
+            <span>HOSPITALITY · MULTIMODAL STUDIO</span>
+          </div>
         </a>
-        <div className="top-context">
-          <span className="pulse" /> POLICY DEMO <span className="divider">/</span> EVIDENCE
-          INVESTIGATOR
+        <div className="top-context" aria-label={explicitOfflineDemo ? "Explicit demo fixture mode" : "Policy Demo API connected"}>
+          <span className="top-context-status"><span className="pulse" />
+            {explicitOfflineDemo ? "DEMO FIXTURE · OPT-IN" : "POLICY DEMO API · 127.0.0.1:8083"}
+          </span>
+          <span className="divider" aria-hidden="true">/</span>
+          <span className="top-context-title">MULTIMODAL EVIDENCE STUDIO</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
-          <a
-            href="#"
-            style={{
-              fontFamily: "ui-monospace,monospace",
-              fontSize: 10,
-              letterSpacing: "0.08em",
-              color: "#285f4d",
-              textDecoration: "none",
-            }}
-          >
-            ← Back to Investigator
-          </a>
-          <div className="profile">
+        <div className="nav-actions">
+          <nav className="mode-switcher" aria-label="Workspace mode">
+            <a href="#" className="mode-pill">
+              <span aria-hidden="true">← </span><span className="mode-number">01 ·</span> Handover Copilot <span className="mode-port">(:8081)</span>
+            </a>
+            <a href="#/demo" className="mode-pill active">
+              <span className="mode-number">02 ·</span> Isolated Policy Demo <span className="mode-port">(:8083)</span>
+            </a>
+          </nav>
+          <div className="profile" aria-label="Signed in as Operations Manager">
             <span className="profile-icon">OM</span>
             <span>
               Operations
@@ -397,12 +715,12 @@ export default function PolicyDemoPage() {
       </header>
 
       <main>
-        {/* ── Synthetic banner ─────────────────────────────────────────────── */}
         <div className="eyebrow" style={{ marginBottom: 20 }}>
-          <span>FIELD NOTE 02</span>
+          <span>STUDIO 02</span>
           <span className="line" />
-          <span>POLICY EVIDENCE DEMO</span>
+          <span>POLICY EVIDENCE &amp; ILLUSTRATIVE MASK AUDIT STUDIO</span>
         </div>
+
         <section className="intro">
           <div>
             <h1>
@@ -411,9 +729,9 @@ export default function PolicyDemoPage() {
               <em>evidence-first.</em>
             </h1>
             <p>
-              Trace how scheduling policy changed between v1 and v2, verify citation provenance
-              locally, then challenge department applicability and observe honest recomputation to
-              INCONCLUSIVE.
+              Compare synthetic policy revisions across v1 and v2, inspect exact SHA-256 citation provenance and
+              illustrative static mask diagrams, then challenge department applicability to observe
+              recomputation to <strong>INCONCLUSIVE</strong>.
             </p>
           </div>
           <div className="intro-stamp">
@@ -426,27 +744,128 @@ export default function PolicyDemoPage() {
           </div>
         </section>
 
+        <section className="kpi-ribbon" aria-label="Policy engine telemetry">
+          <div className="kpi-tile">
+            <div className="kpi-tile-header">
+              <span className="kpi-label">CITATION PROVENANCE</span>
+              <span className="kpi-micro-badge">LOCAL HASH</span>
+            </div>
+            <strong>SHA-256 + Codepoints</strong>
+            <small>
+              <span className="kpi-dot" style={{ background: "#16583e" }} />
+              Synthetic fixture · review required
+            </small>
+          </div>
+          <div className="kpi-tile">
+            <div className="kpi-tile-header">
+              <span className="kpi-label">MULTIMODAL LAYER</span>
+              <span className="kpi-micro-badge">VISION MASK</span>
+            </div>
+            <strong>Illustrative Mask Diagrams</strong>
+            <small>
+              <span className="kpi-dot" style={{ background: "#7c3aed" }} />
+              Visual IoU ≠ semantic proof
+            </small>
+          </div>
+          <div className="kpi-tile">
+            <div className="kpi-tile-header">
+              <span className="kpi-label">OFFICIAL POLICY STATE</span>
+              <span className="kpi-micro-badge">IMMUTABLE</span>
+            </div>
+            <strong>Immutable (False)</strong>
+            <small>
+              <span className="kpi-dot" style={{ background: "#b45309" }} />
+              PROPOSAL_ONLY contract enforced
+            </small>
+          </div>
+          <div className="kpi-tile">
+            <div className="kpi-tile-header">
+              <span className="kpi-label">SESSION AUDIT LOG</span>
+              <span className="kpi-micro-badge">APPEND-ONLY</span>
+            </div>
+            <strong>{historyEvents.length} / 20 Events</strong>
+            <small>
+              <span className="kpi-dot" style={{ background: "#475569" }} />
+              Ephemeral in-memory session trail
+            </small>
+          </div>
+        </section>
+
         <aside className="synthetic-banner">
           <span className="banner-icon">✳</span>
           <div>
-            <strong>Synthetic demo · offline only · human review required</strong>
+            <strong>
+              {explicitOfflineDemo
+                ? "EXPLICIT DEMO FIXTURE MODE ACTIVE · NOT CONNECTED TO 127.0.0.1:8083"
+                : "Synthetic demo · strict status boundaries · human review required"}
+            </strong>
             <span>
-              All policy data is fictional. Evidence demonstrates local citation provenance only —
-              not semantic correctness or legal force.
+              All policy data is fictional. SHA-256 citation provenance is returned by the policy demo API. Mask
+              diagrams and IoU values are static frontend illustrations, not model output. Neither establishes
+              semantic support or legal applicability. Official policy is never mutated (
+              <code>official_policy_mutated: false</code>).
             </span>
           </div>
-          <span className="banner-tag">LOCAL ONLY</span>
+          {explicitOfflineDemo ? (
+            <button type="button" className="quick-fill-btn" onClick={() => setExplicitOfflineDemo(false)}>
+              Exit Demo Mode &amp; Reconnect Port 8083
+            </button>
+          ) : (
+            <span className="banner-tag">PORT 8083</span>
+          )}
         </aside>
 
-        {/* ── Scenario Selector ────────────────────────────────────────────── */}
-        <div style={{ ...card, marginTop: 24, padding: "16px 20px" }}>
+        <aside
+          style={{
+            marginTop: 12,
+            padding: "12px 16px",
+            background: explicitOfflineDemo ? "#f3ecdf" : "#f1f5f9",
+            border: `1px solid ${explicitOfflineDemo ? "#e8d4b8" : "#cbd5e1"}`,
+            borderRadius: 8,
+            fontSize: 11.5,
+            color: explicitOfflineDemo ? "#8a5c20" : "#334155",
+            lineHeight: 1.55,
+          }}
+        >
+          <b>Service Boundary Notice (Studio 02 Isolation):</b> This Policy &amp; SAM 3.1 Studio is strictly decoupled
+          from the main Handover Backend (<code>127.0.0.1:8081</code>).{" "}
+          {explicitOfflineDemo
+            ? "Explicit Demo Fixture Mode was manually selected by the user — no results are attributed to the main backend or live port 8083 service."
+            : "Targeting the isolated policy_demo_api.py service on 127.0.0.1:8083."}
+        </aside>
+
+        {/* P0.2: Visible error alert with explicit opt-in demo button */}
+        {error && (
+          <div
+            className="error"
+            role="alert"
+            style={{
+              marginTop: 20,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: 12,
+            }}
+          >
+            <div>
+              <strong>Policy Demo API Error:</strong> {error}
+            </div>
+            <button type="button" className="quick-fill-btn" onClick={() => setExplicitOfflineDemo(true)}>
+              Enable Explicit Demo Fixture Mode
+            </button>
+          </div>
+        )}
+
+        {/* ── Scenario Selector Cards + Dropdown ───────────────────────────── */}
+        <div style={{ ...card, marginTop: 24, padding: "20px 24px" }}>
           <div
             style={{
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
               flexWrap: "wrap",
-              gap: 12,
+              gap: 14,
             }}
           >
             <div>
@@ -457,14 +876,15 @@ export default function PolicyDemoPage() {
                 style={{
                   margin: 0,
                   fontSize: 13,
-                  color: "#36443b",
-                  fontFamily: "Georgia,'Times New Roman',serif",
+                  color: "var(--ink-secondary)",
+                  fontFamily: "Inter, sans-serif",
                 }}
               >
-                Switch between synthetic luxury hotel scenarios to evaluate distinct policy relations through the evidence engine.
+                Switch between synthetic hospitality scenarios to inspect policy demo proposals, static illustrative
+                mask diagrams, and department challenges.
               </p>
             </div>
-            <div style={{ minWidth: 280 }}>
+            <div style={{ minWidth: 260 }}>
               <select
                 aria-label="Select policy comparison scenario"
                 value={selectedScenarioId}
@@ -474,13 +894,14 @@ export default function PolicyDemoPage() {
                   setChallengeError("");
                 }}
                 style={{
-                  fontFamily: "ui-monospace,monospace",
+                  fontFamily: "var(--mono)",
                   fontSize: 12,
-                  color: "#27322f",
-                  border: "1px solid #c7ccc4",
-                  background: "#fbfaf6",
-                  padding: "8px 12px",
-                  borderRadius: 2,
+                  fontWeight: 600,
+                  color: "var(--ink)",
+                  border: "1px solid var(--line-strong)",
+                  background: "#ffffff",
+                  padding: "9px 12px",
+                  borderRadius: 6,
                   width: "100%",
                   cursor: "pointer",
                 }}
@@ -493,41 +914,61 @@ export default function PolicyDemoPage() {
               </select>
             </div>
           </div>
-          {currentScenarioMeta && (
-            <div
-              style={{
-                marginTop: 10,
-                display: "flex",
-                gap: 8,
-                alignItems: "center",
-                flexWrap: "wrap",
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 11,
-                  color: "#617568",
-                  fontFamily: "Georgia,'Times New Roman',serif",
-                  fontStyle: "italic",
-                }}
-              >
-                {currentScenarioMeta.description}
-              </span>
-              <Badge
-                text={currentScenarioMeta.relation_type}
-                color={
-                  currentScenarioMeta.relation_type === "CONTRADICTION"
-                    ? "orange"
-                    : currentScenarioMeta.relation_type === "SCOPE_OR_TIME_DIFFERENCE"
-                    ? "review"
-                    : "green"
-                }
-              />
-            </div>
-          )}
+
+          <div className="scenario-pills">
+            {scenarios.map((s) => {
+              const isActive = selectedScenarioId === s.id;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  className={`scenario-pill-btn ${isActive ? "active" : ""}`}
+                  onClick={() => {
+                    setSelectedScenarioId(s.id);
+                    setChallenge(null);
+                    setChallengeError("");
+                  }}
+                >
+                  <div>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 6,
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 9.5,
+                          fontFamily: "var(--mono)",
+                          color: "var(--ink-tertiary)",
+                          letterSpacing: "0.1em",
+                          fontWeight: 700,
+                        }}
+                      >
+                        {s.id.toUpperCase()}
+                      </span>
+                      <Badge
+                        text={s.relation_type}
+                        color={
+                          s.relation_type === "CONTRADICTION"
+                            ? "orange"
+                            : s.relation_type === "SCOPE_OR_TIME_DIFFERENCE"
+                            ? "review"
+                            : "green"
+                        }
+                      />
+                    </div>
+                    <span>{s.title}</span>
+                  </div>
+                  <small>{s.description}</small>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        {/* ── Loading / error ───────────────────────────────────────────────── */}
         {loading && (
           <div
             style={{
@@ -542,17 +983,9 @@ export default function PolicyDemoPage() {
             LOADING SCENARIO…
           </div>
         )}
-        {error && (
-          <div className="error" role="alert" style={{ marginTop: 20 }}>
-            {error}
-          </div>
-        )}
 
         {scenario && (
           <>
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 1: Policy Versions Panel
-            ────────────────────────────────────────────────────────────── */}
             <SectionHeading
               num="01 — POLICY VERSIONS"
               title={
@@ -563,58 +996,62 @@ export default function PolicyDemoPage() {
             />
 
             <div className="policy-versions-grid">
-              {/* V1 Card */}
               {(() => {
                 const older = scenario.provenance_details.find((d) => d.side === "OLDER");
                 const isLounge = scenario.comparison_id.includes("lounge");
                 const olderDates = isLounge ? "2022-01-01 → 2024-01-01" : "2024-01-01 → 2027-01-01";
                 return (
-                  <div style={{ ...card, borderTop: "3px solid #9da79b" }}>
-                    <SectionKicker>POLICY v1 — OLDER BASELINE</SectionKicker>
-                    <div style={{ display: "grid", gap: 10 }}>
-                      <div>
-                        <span style={labelStyle}>VERSION ID</span>
-                        <p style={valueStyle}>v1</p>
+                  <div style={{ ...card, borderTop: "3px solid #64748b", background: "#ffffff" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                      <SectionKicker>POLICY v1 — HISTORIC BASELINE</SectionKicker>
+                      <Badge text="BASELINE v1" color="muted" />
+                    </div>
+                    <div style={{ display: "grid", gap: 14 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <div>
+                          <span style={labelStyle}>VERSION ID</span>
+                          <p style={valueStyle}>v1</p>
+                        </div>
+                        <div>
+                          <span style={labelStyle}>EFFECTIVE DATES</span>
+                          <p style={{ ...valueStyle, fontFamily: "var(--mono)", fontSize: 13 }}>{olderDates}</p>
+                        </div>
                       </div>
-                      <div>
-                        <span style={labelStyle}>EFFECTIVE DATES</span>
-                        <p style={valueStyle}>{olderDates}</p>
-                      </div>
-                      <div>
-                        <span style={labelStyle}>DOCUMENT ID</span>
-                        <p style={{ ...valueStyle, fontFamily: "ui-monospace,monospace", fontSize: 11 }}>
-                          {scenario.comparison_id.replace("cmp-", "").replace("-001", "").replace("-002", "").replace("-003", "")}
-                        </p>
-                      </div>
-                      <div>
-                        <span style={labelStyle}>PASSAGE ID</span>
-                        <p
-                          style={{
-                            fontFamily: "ui-monospace,monospace",
-                            fontSize: 10,
-                            color: "#758078",
-                            margin: 0,
-                          }}
-                        >
-                          {older?.passage_id ?? "—"}
-                        </p>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <div>
+                          <span style={labelStyle}>DOCUMENT ID</span>
+                          <p style={{ ...valueStyle, fontFamily: "var(--mono)", fontSize: 12 }}>
+                            {scenario.comparison_id
+                              .replace("cmp-", "")
+                              .replace("-001", "")
+                              .replace("-002", "")
+                              .replace("-003", "")}
+                          </p>
+                        </div>
+                        <div>
+                          <span style={labelStyle}>PASSAGE ID</span>
+                          <p style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-secondary)", margin: 0 }}>
+                            {older?.passage_id ?? "—"}
+                          </p>
+                        </div>
                       </div>
                       <div>
                         <span style={labelStyle}>RELEVANT PASSAGE (BASELINE REQUIREMENT)</span>
                         <blockquote
                           style={{
                             fontFamily: "Georgia,'Times New Roman',serif",
-                            fontSize: 13,
+                            fontSize: 14,
                             fontStyle: "italic",
-                            color: "#37443c",
+                            color: "#1e293b",
                             margin: "8px 0 0",
-                            padding: "10px 14px",
-                            background: "#e8f0eb",
-                            borderLeft: "3px solid #285f4d",
-                            lineHeight: 1.6,
+                            padding: "16px 20px",
+                            background: "#f8fafc",
+                            borderLeft: "3px solid #64748b",
+                            borderRadius: "0 8px 8px 0",
+                            lineHeight: 1.65,
                           }}
                         >
-                          "{older?.quote ?? "—"}"
+                          “{older?.quote ?? "—"}”
                         </blockquote>
                       </div>
                     </div>
@@ -622,58 +1059,62 @@ export default function PolicyDemoPage() {
                 );
               })()}
 
-              {/* V2 Card */}
               {(() => {
                 const newer = scenario.provenance_details.find((d) => d.side === "NEWER");
                 const isLounge = scenario.comparison_id.includes("lounge");
                 const newerDates = isLounge ? "2025-01-01 → 2028-01-01" : "2026-01-01 → 2027-01-01";
                 return (
-                  <div style={{ ...card, borderTop: "3px solid #285f4d" }}>
-                    <SectionKicker>POLICY v2 — NEWER REVISION</SectionKicker>
-                    <div style={{ display: "grid", gap: 10 }}>
-                      <div>
-                        <span style={labelStyle}>VERSION ID</span>
-                        <p style={valueStyle}>v2</p>
+                  <div style={{ ...card, borderTop: "3px solid #16583e", background: "#ffffff" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                      <SectionKicker>POLICY v2 — REVISED AMENDMENT</SectionKicker>
+                      <Badge text="REVISED v2" color="green" />
+                    </div>
+                    <div style={{ display: "grid", gap: 14 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <div>
+                          <span style={labelStyle}>VERSION ID</span>
+                          <p style={valueStyle}>v2</p>
+                        </div>
+                        <div>
+                          <span style={labelStyle}>EFFECTIVE DATES</span>
+                          <p style={{ ...valueStyle, fontFamily: "var(--mono)", fontSize: 13 }}>{newerDates}</p>
+                        </div>
                       </div>
-                      <div>
-                        <span style={labelStyle}>EFFECTIVE DATES</span>
-                        <p style={valueStyle}>{newerDates}</p>
-                      </div>
-                      <div>
-                        <span style={labelStyle}>DOCUMENT ID</span>
-                        <p style={{ ...valueStyle, fontFamily: "ui-monospace,monospace", fontSize: 11 }}>
-                          {scenario.comparison_id.replace("cmp-", "").replace("-001", "").replace("-002", "").replace("-003", "")}
-                        </p>
-                      </div>
-                      <div>
-                        <span style={labelStyle}>PASSAGE ID</span>
-                        <p
-                          style={{
-                            fontFamily: "ui-monospace,monospace",
-                            fontSize: 10,
-                            color: "#758078",
-                            margin: 0,
-                          }}
-                        >
-                          {newer?.passage_id ?? "—"}
-                        </p>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <div>
+                          <span style={labelStyle}>DOCUMENT ID</span>
+                          <p style={{ ...valueStyle, fontFamily: "var(--mono)", fontSize: 12 }}>
+                            {scenario.comparison_id
+                              .replace("cmp-", "")
+                              .replace("-001", "")
+                              .replace("-002", "")
+                              .replace("-003", "")}
+                          </p>
+                        </div>
+                        <div>
+                          <span style={labelStyle}>PASSAGE ID</span>
+                          <p style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-secondary)", margin: 0 }}>
+                            {newer?.passage_id ?? "—"}
+                          </p>
+                        </div>
                       </div>
                       <div>
                         <span style={labelStyle}>RELEVANT PASSAGE (REVISED REQUIREMENT)</span>
                         <blockquote
                           style={{
                             fontFamily: "Georgia,'Times New Roman',serif",
-                            fontSize: 13,
+                            fontSize: 14,
                             fontStyle: "italic",
-                            color: "#37443c",
+                            color: "#0f172a",
                             margin: "8px 0 0",
-                            padding: "10px 14px",
-                            background: "#e3ede7",
-                            borderLeft: "3px solid #285f4d",
-                            lineHeight: 1.6,
+                            padding: "16px 20px",
+                            background: "#f0fdf4",
+                            borderLeft: "3px solid #16583e",
+                            borderRadius: "0 8px 8px 0",
+                            lineHeight: 1.65,
                           }}
                         >
-                          "{newer?.quote ?? "—"}"
+                          “{newer?.quote ?? "—"}”
                         </blockquote>
                       </div>
                     </div>
@@ -682,76 +1123,153 @@ export default function PolicyDemoPage() {
               })()}
             </div>
 
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 2: Proposal vs Assessment Panel
-            ────────────────────────────────────────────────────────────── */}
-            <SectionHeading num="02 — PROPOSAL vs ASSESSMENT" title="What the system proposed — and what it can verify" />
+            <SectionHeading
+              num="02 — PROPOSAL vs ASSESSMENT"
+              title="Candidate proposal vs. validated system classification"
+            />
 
-            <div style={{ ...card, display: "grid", gap: 18 }}>
-              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 14 }}>
-                <div>
-                  <span style={labelStyle}>PROPOSED RELATION</span>
-                  <p
-                    style={{
-                      fontFamily: "Georgia,'Times New Roman',serif",
-                      fontSize: 20,
-                      fontWeight: 500,
-                      margin: 0,
-                      color: "#285f4d",
-                    }}
-                  >
-                    {scenario.proposed_relation}
-                  </p>
+            <div style={{ ...card, display: "grid", gap: 20 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+                  gap: 20,
+                  alignItems: "stretch",
+                }}
+              >
+                <div
+                  style={{
+                    padding: "18px 20px",
+                    background: "#f8fafc",
+                    border: "1px solid #e2e8f0",
+                    borderRadius: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <div>
+                    <span style={labelStyle}>{POLICY_DEMO_PROPOSAL_LABEL}</span>
+                    <p
+                      style={{
+                        fontFamily: "Inter, sans-serif",
+                        fontSize: 22,
+                        fontWeight: 700,
+                        margin: "6px 0 4px",
+                        color: "#1e293b",
+                        letterSpacing: "-0.02em",
+                      }}
+                    >
+                      {scenario.proposed_relation}
+                    </p>
+                  </div>
+                  <div style={{ marginTop: 12 }}>
+                    <Badge text="STATUS: PROPOSAL_ONLY" color="muted" />
+                  </div>
                 </div>
-                <div style={{ marginLeft: 28 }}>
-                  <span style={labelStyle}>SYSTEM ASSESSMENT</span>
-                  <p
-                    style={{
-                      fontFamily: "Georgia,'Times New Roman',serif",
-                      fontSize: 20,
-                      fontWeight: 500,
-                      margin: 0,
-                      color: "#b45c37",
-                    }}
-                  >
-                    {scenario.core_classification}
-                  </p>
+
+                <div
+                  style={{
+                    padding: "18px 20px",
+                    background: "#fffbeb",
+                    border: "1px solid #fef3c7",
+                    borderLeft: "4px solid #d97706",
+                    borderRadius: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <div>
+                    <span style={labelStyle}>VALIDATED CORE CLASSIFICATION (DETERMINISTIC)</span>
+                    <p
+                      style={{
+                        fontFamily: "Inter, sans-serif",
+                        fontSize: 22,
+                        fontWeight: 700,
+                        margin: "6px 0 4px",
+                        color: "#b45309",
+                        letterSpacing: "-0.02em",
+                      }}
+                    >
+                      {scenario.core_classification}
+                    </p>
+                  </div>
+                  <div style={{ marginTop: 12 }}>
+                    <Badge text="CORE ENGINE: INCONCLUSIVE (ABSTAIN)" color="orange" />
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    padding: "18px 20px",
+                    background: "#f0fdf4",
+                    border: "1px solid #dcfce7",
+                    borderLeft: "4px solid #16583e",
+                    borderRadius: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <div>
+                    <span style={labelStyle}>OFFICIAL POLICY MUTATED</span>
+                    <p
+                      style={{
+                        fontFamily: "var(--mono)",
+                        fontSize: 18,
+                        fontWeight: 700,
+                        margin: "6px 0 4px",
+                        color: "#16583e",
+                      }}
+                    >
+                      {String(scenario.official_policy_mutated).toUpperCase()} (IMMUTABLE)
+                    </p>
+                  </div>
+                  <div style={{ marginTop: 12 }}>
+                    <Badge text="CONTRACT: MUTATION LOCKED" color="green" />
+                  </div>
                 </div>
               </div>
 
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-                <Badge text={scenario.status} color="muted" />
-                <Badge text={scenario.semantic_support} color="orange" />
-                {scenario.human_review_required && (
-                  <Badge text="HUMAN REVIEW REQUIRED" color="review" />
-                )}
+                <Badge text={`STATUS: ${scenario.status}`} color="muted" />
+                <Badge text={`SEMANTIC SUPPORT: ${scenario.semantic_support}`} color="orange" />
+                <Badge text={`CORE: ${scenario.core_classification}`} color="review" />
+                {scenario.human_review_required && <Badge text="HUMAN REVIEW REQUIRED" color="review" />}
               </div>
 
               <div
                 style={{
-                  background: "#f3ecdf",
-                  border: "1px solid #e8d4b8",
-                  borderRadius: 2,
-                  padding: "12px 15px",
-                  fontSize: 11,
-                  color: "#8a5c20",
+                  background: "#fefcf6",
+                  border: "1px solid #fde68a",
+                  borderLeft: "4px solid #d97706",
+                  borderRadius: 8,
+                  padding: "14px 18px",
+                  fontSize: 12,
+                  color: "#92400e",
                   lineHeight: 1.6,
                 }}
               >
-                <b>Notice:</b> This proposal has not been verified. Quote matching establishes text
-                provenance only — not semantic correctness or department applicability.
+                <b>Status Boundary Notice:</b> <code>PROPOSAL_ONLY</code> indicates a candidate relation synthesized by
+                the model, never an approved policy conclusion. <code>NOT_VERIFIED</code> confirms semantic support has
+                not been independently proven.
               </div>
 
               <div>
-                <span style={labelStyle}>REASONING</span>
+                <span style={labelStyle}>CANDIDATE REASONING</span>
                 <p
                   style={{
-                    fontSize: 12,
-                    color: "#57645b",
+                    fontSize: 13,
+                    color: "var(--ink-secondary)",
                     lineHeight: 1.65,
-                    margin: 0,
+                    margin: "4px 0 0",
                     fontFamily: "Georgia,'Times New Roman',serif",
                     fontStyle: "italic",
+                    background: "#f8fafc",
+                    padding: "14px 18px",
+                    borderRadius: 8,
+                    border: "1px solid #e2e8f0",
                   }}
                 >
                   "{scenario.reasoning}"
@@ -759,24 +1277,29 @@ export default function PolicyDemoPage() {
               </div>
             </div>
 
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 3: Evidence Inspector
-            ────────────────────────────────────────────────────────────── */}
-            <SectionHeading num="03 — EVIDENCE INSPECTOR" title="Citation provenance — locally derived" />
+            <SectionHeading
+              num="03 — EVIDENCE & MULTIMODAL INSPECTOR"
+              title="API citation provenance & illustrative static visual regions"
+            />
 
             <div
               style={{
-                marginBottom: 14,
-                padding: "10px 14px",
-                background: "#e8eee6",
-                border: "1px solid #d5e0d4",
-                borderRadius: 2,
-                fontSize: 11,
-                color: "#315b47",
+                marginBottom: 16,
+                padding: "12px 16px",
+                background: "#f1f5f9",
+                border: "1px solid #cbd5e1",
+                borderRadius: 8,
+                fontSize: 11.5,
+                color: "#334155",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
               }}
             >
-              <b>Provenance verified locally — not by model.</b>{" "}
-              {scenario.provenance_limitation_notice}
+              <Badge text="ZERO TRUST" color="green" />
+              <span>
+                <b>Provenance verified locally — not by model.</b> {scenario.provenance_limitation_notice}
+              </span>
             </div>
 
             <div style={{ display: "grid", gap: 14 }}>
@@ -785,7 +1308,7 @@ export default function PolicyDemoPage() {
                   key={detail.passage_id + i}
                   style={{
                     ...card,
-                    borderLeft: `4px solid ${detail.side === "OLDER" ? "#9da79b" : "#285f4d"}`,
+                    borderLeft: `4px solid ${detail.side === "OLDER" ? "#64748b" : "#16583e"}`,
                   }}
                 >
                   <div
@@ -795,59 +1318,56 @@ export default function PolicyDemoPage() {
                       alignItems: "flex-start",
                       flexWrap: "wrap",
                       gap: 10,
-                      marginBottom: 12,
+                      marginBottom: 14,
                     }}
                   >
                     <div>
                       <SectionKicker>
                         {detail.side} CITATION — PASSAGE {detail.passage_ordinal ?? i + 1}
                       </SectionKicker>
-                      <span
-                        style={{
-                          fontFamily: "ui-monospace,monospace",
-                          fontSize: 10,
-                          color: "#496a58",
-                        }}
-                      >
+                      <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-secondary)", fontWeight: 600 }}>
                         {detail.passage_id}
                       </span>
                     </div>
-                    <Badge text={detail.verified_locally ? "LOCALLY VERIFIED" : "UNVERIFIED"} color="green" />
+                    <Badge text={detail.verified_locally ? "✓ SHA-256 VERIFIED LOCALLY" : "UNVERIFIED"} color="green" />
                   </div>
 
                   <div className="citation-offsets-grid">
                     <div>
                       <span style={labelStyle}>START CP</span>
-                      <p style={{ fontFamily: "ui-monospace,monospace", fontSize: 11, margin: 0 }}>
-                        {detail.start_cp}
-                      </p>
+                      <p style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 700, margin: 0 }}>{detail.start_cp}</p>
                     </div>
                     <div>
                       <span style={labelStyle}>END CP</span>
-                      <p style={{ fontFamily: "ui-monospace,monospace", fontSize: 11, margin: 0 }}>
-                        {detail.end_cp}
+                      <p style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 700, margin: 0 }}>{detail.end_cp}</p>
+                    </div>
+                    <div>
+                      <span style={labelStyle}>OFFSET LENGTH</span>
+                      <p style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 700, margin: 0 }}>
+                        {detail.end_cp - detail.start_cp} chars
                       </p>
                     </div>
                     <div>
                       <span style={labelStyle}>SOURCE SHA256</span>
-                      <p style={{ fontFamily: "ui-monospace,monospace", fontSize: 11, margin: 0 }}>
-                        {detail.source_sha256.slice(0, 8)}…
+                      <p style={{ fontFamily: "var(--mono)", fontSize: 11, margin: 0, color: "var(--ink-secondary)" }}>
+                        {detail.source_sha256.slice(0, 24)}…
                       </p>
                     </div>
                   </div>
 
                   <div>
-                    <span style={labelStyle}>EXACT QUOTE</span>
+                    <span style={labelStyle}>EXACT VERBATIM SUBSTRING</span>
                     <blockquote
                       style={{
                         fontFamily: "Georgia,'Times New Roman',serif",
-                        fontSize: 13,
+                        fontSize: 13.5,
                         fontStyle: "italic",
-                        color: "#37443c",
+                        color: "var(--ink)",
                         margin: "6px 0 0",
-                        padding: "10px 14px",
-                        background: "#f4f3ee",
-                        borderLeft: "2px solid #cfd4ca",
+                        padding: "12px 16px",
+                        background: "#f8fafc",
+                        borderLeft: "3px solid #cbd5e1",
+                        borderRadius: "0 6px 6px 0",
                         lineHeight: 1.6,
                       }}
                     >
@@ -858,21 +1378,182 @@ export default function PolicyDemoPage() {
               ))}
             </div>
 
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 4: Reviewer Challenge Panel
-            ────────────────────────────────────────────────────────────── */}
+            <div className="sam-inspector-card" style={{ marginTop: 24 }}>
+              <div className="sam-header">
+                <div>
+                  <SectionKicker>03B — STATIC FRONTEND ILLUSTRATION (NOT MODEL SEGMENTATION)</SectionKicker>
+                  <h3 style={{ margin: "4px 0 0", fontFamily: "Inter, Georgia, serif", fontSize: 20, fontWeight: 600 }}>
+                    {visualEvidence.caption}
+                  </h3>
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <Badge text={visualEvidence.evidenceId} color="purple" />
+                  <Badge text={`ILLUSTRATIVE STATIC IOU: ${visualEvidence.iouConfidence}`} color="muted" />
+                  <button
+                    type="button"
+                    className="mask-toggle-btn"
+                    onClick={() => setShowSamMask((prev) => !prev)}
+                  >
+                    {showSamMask ? "◉ Hide Illustrative Mask Overlay" : "◎ Show Illustrative Mask Overlay"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="sam-canvas-grid">
+                <div className={`sam-visual-stage ${showSamMask ? "mask-active" : ""}`}>
+                  <div className="sam-hud-bar">
+                    <span className="sam-coord-tag">STATIC ILLUSTRATION RECTANGLE {visualEvidence.bboxCoords}</span>
+                    <span className="sam-coord-tag">SOURCE: FRONTEND FIXTURE ART</span>
+                  </div>
+
+                  <svg
+                    viewBox="0 0 520 175"
+                    className="sam-svg-blueprint"
+                    role="img"
+                    aria-label="Illustrative static visual comparison canvas; not model output"
+                  >
+                    <defs>
+                      <pattern id="samGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                        <path
+                          d="M 20 0 L 0 0 0 20"
+                          fill="none"
+                          stroke="rgba(255,255,255,0.06)"
+                          strokeWidth="1"
+                        />
+                      </pattern>
+                    </defs>
+                    <rect width="520" height="175" fill="url(#samGrid)" />
+
+                    <rect
+                      x="14"
+                      y="16"
+                      width="235"
+                      height="142"
+                      rx="4"
+                      fill="rgba(255,255,255,0.04)"
+                      stroke="rgba(255,255,255,0.18)"
+                    />
+                    <text x="26" y="36" fill="#94a3b8" fontSize="9" fontFamily="monospace" letterSpacing="1" fontWeight="bold">
+                      POLICY v1 ARTIFACT REGION
+                    </text>
+                    <text x="26" y="62" fill="#f8fafc" fontSize="11" fontFamily="Inter, sans-serif">
+                      {visualEvidence.olderVisualNote.slice(0, 42)}
+                    </text>
+                    <text x="26" y="78" fill="#94a3b8" fontSize="10" fontFamily="Inter, sans-serif">
+                      {visualEvidence.olderVisualNote.slice(42)}
+                    </text>
+
+                    <rect
+                      x="271"
+                      y="16"
+                      width="235"
+                      height="142"
+                      rx="4"
+                      fill="rgba(255,255,255,0.04)"
+                      stroke="rgba(255,255,255,0.18)"
+                    />
+                    <text x="283" y="36" fill="#4ade80" fontSize="9" fontFamily="monospace" letterSpacing="1" fontWeight="bold">
+                      POLICY v2 ARTIFACT REGION
+                    </text>
+                    <text x="283" y="62" fill="#f8fafc" fontSize="11" fontFamily="Inter, sans-serif">
+                      {visualEvidence.newerVisualNote.slice(0, 42)}
+                    </text>
+                    <text x="283" y="78" fill="#94a3b8" fontSize="10" fontFamily="Inter, sans-serif">
+                      {visualEvidence.newerVisualNote.slice(42)}
+                    </text>
+
+                    {showSamMask && (
+                      <g>
+                        <rect
+                          x="24"
+                          y="95"
+                          width="215"
+                          height="48"
+                          rx="3"
+                          fill="rgba(168, 85, 247, 0.28)"
+                          stroke="#c084fc"
+                          strokeWidth="1.5"
+                          strokeDasharray="4 2"
+                        />
+                        <circle cx="24" cy="95" r="3" fill="#e9d5ff" />
+                        <circle cx="239" cy="143" r="3" fill="#e9d5ff" />
+                        <text x="34" y="116" fill="#f3e8ff" fontSize="9.5" fontFamily="monospace" fontWeight="bold">
+                          MASK A · {visualEvidence.v1Highlight}
+                        </text>
+                        <text x="34" y="131" fill="#d8b4fe" fontSize="8.5" fontFamily="monospace">
+                          STATIC ILLUSTRATION · {visualEvidence.iouConfidence}
+                        </text>
+
+                        <rect
+                          x="281"
+                          y="95"
+                          width="215"
+                          height="48"
+                          rx="3"
+                          fill="rgba(249, 115, 22, 0.28)"
+                          stroke="#fb923c"
+                          strokeWidth="1.5"
+                          strokeDasharray="4 2"
+                        />
+                        <circle cx="281" cy="95" r="3" fill="#fed7aa" />
+                        <circle cx="496" cy="143" r="3" fill="#fed7aa" />
+                        <text x="291" y="116" fill="#ffedd5" fontSize="9.5" fontFamily="monospace" fontWeight="bold">
+                          MASK B · {visualEvidence.v2Highlight}
+                        </text>
+                        <text x="291" y="131" fill="#fdba74" fontSize="8.5" fontFamily="monospace">
+                          Spatial Delta Detected · Review Required
+                        </text>
+                      </g>
+                    )}
+                  </svg>
+
+                  {showSamMask && (
+                    <div className="sam-mask-overlay" aria-label="Illustrative static mask region">
+                      <span>{visualEvidence.maskRegionLabel}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: "grid", gap: 12, alignContent: "start" }}>
+                  <div>
+                    <span style={labelStyle}>POLICY-SPECIFIC VISUAL TIE-IN</span>
+                    <p style={{ fontSize: 13, color: "var(--ink)", lineHeight: 1.6, margin: "4px 0 0" }}>
+                      {visualEvidence.policyTieIn}
+                    </p>
+                  </div>
+                  <div
+                    style={{
+                      background: "#fffbeb",
+                      border: "1px solid #fef3c7",
+                      borderLeft: "4px solid #d97706",
+                      padding: "12px 14px",
+                      borderRadius: 8,
+                      fontSize: 11.5,
+                      color: "#92400e",
+                      lineHeight: 1.55,
+                    }}
+                  >
+                    <b>Transparency Boundary:</b> The displayed IoU value ({visualEvidence.iouConfidence}) is static
+                    illustrative fixture content, not model segmentation confidence. It is separate from policy
+                    evidence verification (<code>semantic_support: NOT_VERIFIED</code>).
+                  </div>
+                </div>
+              </div>
+
+              <p className="static-visual-notice">{STATIC_VISUAL_NOTICE}</p>
+            </div>
+
             <SectionHeading
               num="04 — REVIEWER CHALLENGE"
               title="Multi-turn department applicability challenge"
             />
 
             <div style={card}>
-              <div style={{ display: "grid", gap: 14 }}>
-                <p style={{ fontSize: 13, color: "#57645b", lineHeight: 1.65, margin: 0 }}>
-                  A reviewer questions whether the v1 baseline requirement applied to a specific
-                  department. Select an operational department below to submit a challenge and
-                  observe honest recomputation to <strong>INCONCLUSIVE</strong>. Consecutive challenges
-                  are recorded in the session audit trail.
+              <div style={{ display: "grid", gap: 16 }}>
+                <p style={{ fontSize: 13.5, color: "var(--ink-secondary)", lineHeight: 1.65, margin: 0 }}>
+                  A reviewer questions whether the policy revision is grounded for a specific operational department.
+                  Select a target department below to submit a challenge to <code>POST /demo-api/challenge</code> and
+                  observe honest recomputation to <strong>INCONCLUSIVE</strong>.
                 </p>
 
                 {challengeError && (
@@ -885,61 +1566,53 @@ export default function PolicyDemoPage() {
                   style={{
                     display: "flex",
                     flexWrap: "wrap",
-                    gap: 12,
+                    gap: 14,
                     alignItems: "center",
-                    padding: "14px 16px",
-                    background: "#f4f3ee",
-                    borderRadius: 2,
-                    border: "1px solid #e1e0d8",
+                    padding: "20px 22px",
+                    background: "#f8fafc",
+                    borderRadius: 12,
+                    border: "1px solid #e2e8f0",
                   }}
                 >
-                  <label htmlFor="challenge-dept-select" style={{ ...labelStyle, marginBottom: 0 }}>
-                    TARGET DEPARTMENT:
-                  </label>
-                  <select
-                    id="challenge-dept-select"
-                    aria-label="Select target department to challenge"
-                    value={selectedDept}
-                    onChange={(e) => setSelectedDept(e.target.value)}
-                    style={{
-                      fontFamily: "ui-monospace,monospace",
-                      fontSize: 12,
-                      color: "#27322f",
-                      border: "1px solid #c7ccc4",
-                      background: "#fff",
-                      padding: "7px 12px",
-                      borderRadius: 2,
-                      cursor: "pointer",
-                      minWidth: 180,
-                    }}
-                  >
+                  <span style={{ ...labelStyle, marginBottom: 0 }}>
+                    SELECT TARGET DEPARTMENT:
+                  </span>
+
+                  <div className="dept-pill-selector">
                     {(SCENARIO_DEPARTMENTS[selectedScenarioId] || ["HOUSEKEEPING"]).map((d) => (
-                      <option key={d} value={d}>
+                      <button
+                        key={d}
+                        type="button"
+                        className={`dept-pill-btn ${selectedDept === d ? "active" : ""}`}
+                        onClick={() => setSelectedDept(d)}
+                      >
                         {d}
-                      </option>
+                      </button>
                     ))}
-                  </select>
+                  </div>
 
-                  <button
-                    className="primary"
-                    onClick={runChallenge}
-                    disabled={challenging}
-                    aria-busy={challenging}
-                  >
-                    {challenging ? "Recomputing…" : `Challenge Applicability to ${selectedDept}`}
-                    <span>↗</span>
-                  </button>
-
-                  {challenge && (
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                     <button
-                      className="secondary"
-                      onClick={startNewInvestigation}
-                      disabled={resetting}
-                      aria-busy={resetting}
+                      className="primary"
+                      onClick={runChallenge}
+                      disabled={challenging}
+                      aria-busy={challenging}
                     >
-                      {resetting ? "Resetting…" : "Start New Investigation"} <span>↺</span>
+                      {challenging ? "Recomputing…" : `Challenge Applicability to ${selectedDept}`}
+                      <span>↗</span>
                     </button>
-                  )}
+
+                    {challenge && (
+                      <button
+                        className="secondary"
+                        onClick={startNewInvestigation}
+                        disabled={resetting}
+                        aria-busy={resetting}
+                      >
+                        {resetting ? "Resetting…" : "Start New Investigation"} <span>↺</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {challenge && (
@@ -947,80 +1620,64 @@ export default function PolicyDemoPage() {
                     role="region"
                     aria-live="polite"
                     aria-label="Challenge recomputation results"
-                    style={{ display: "grid", gap: 18, marginTop: 6 }}
+                    style={{ display: "grid", gap: 18, marginTop: 10 }}
                   >
-                    {/* Before / After comparison */}
                     <div className="challenge-comparison-grid">
-                      <div
-                        style={{
-                          background: "#eeede6",
-                          border: "1px solid #e1e0d8",
-                          borderRadius: 2,
-                          padding: "14px 16px",
-                        }}
-                      >
-                        <SectionKicker>BEFORE CHALLENGE</SectionKicker>
-                        <p
-                          style={{
-                            fontFamily: "Georgia,'Times New Roman',serif",
-                            fontSize: 18,
-                            fontWeight: 500,
-                            color: "#285f4d",
-                            margin: "4px 0",
-                          }}
-                        >
-                          {scenario.proposed_relation}
-                        </p>
-                        <Badge text="PROPOSAL_ONLY" color="muted" />
+                      <div className="before-after-card before">
+                        <div>
+                          <SectionKicker>BEFORE CHALLENGE</SectionKicker>
+                          <p
+                            style={{
+                              fontFamily: "Inter, sans-serif",
+                              fontSize: 20,
+                              fontWeight: 700,
+                              color: "#334155",
+                              margin: "6px 0",
+                            }}
+                          >
+                            {scenario.proposed_relation}
+                          </p>
+                        </div>
+                        <div>
+                          <Badge text="PROPOSAL_ONLY" color="muted" />
+                        </div>
                       </div>
 
-                      <div
-                        style={{
-                          background: "#f3ecdf",
-                          border: "1px solid #e8d4b8",
-                          borderRadius: 2,
-                          padding: "14px 16px",
-                        }}
-                      >
-                        <SectionKicker>
-                          AFTER CHALLENGE ({challenge.challenge.target_department})
-                        </SectionKicker>
-                        <p
-                          style={{
-                            fontFamily: "Georgia,'Times New Roman',serif",
-                            fontSize: 18,
-                            fontWeight: 500,
-                            color: "#b45c37",
-                            margin: "4px 0",
-                          }}
-                        >
-                          {challenge.recomputed_proposal.proposed_relation}
-                        </p>
-                        <Badge text={challenge.recomputed_proposal.status} color="orange" />
+                      <div className="before-after-card after">
+                        <div>
+                          <SectionKicker>
+                            AFTER CHALLENGE ({challenge.challenge.target_department})
+                          </SectionKicker>
+                          <p
+                            style={{
+                              fontFamily: "Inter, sans-serif",
+                              fontSize: 20,
+                              fontWeight: 700,
+                              color: "#b45309",
+                              margin: "6px 0",
+                            }}
+                          >
+                            {challenge.recomputed_proposal.proposed_relation}
+                          </p>
+                        </div>
+                        <div>
+                          <Badge text={`${challenge.recomputed_proposal.status} (ABSTAIN)`} color="orange" />
+                        </div>
                       </div>
                     </div>
 
-                    {/* Applicability audit */}
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-                      <span style={{ fontSize: 12, color: "#57645b" }}>Applicability status:</span>
-                      <Badge
-                        text={`${challenge.applicability_audit.applicability_status}`}
-                        color="orange"
-                      />
-                      <span style={{ fontSize: 12, color: "#57645b", marginLeft: 10 }}>
+                      <span style={{ fontSize: 12, color: "var(--ink-secondary)" }}>Applicability status:</span>
+                      <Badge text={challenge.applicability_audit.applicability_status} color="orange" />
+                      <span style={{ fontSize: 12, color: "var(--ink-secondary)", marginLeft: 10 }}>
                         Contract enforcement:
                       </span>
                       <Badge
                         text={`one_sided_change_rejected: ${challenge.contract_enforcement.one_sided_change_rejected}`}
-                        color={
-                          challenge.contract_enforcement.one_sided_change_rejected
-                            ? "review"
-                            : "muted"
-                        }
+                        color={challenge.contract_enforcement.one_sided_change_rejected ? "green" : "muted"}
                       />
                     </div>
 
-                    {/* Uncertainty reasons */}
                     <div>
                       <span style={labelStyle}>UNCERTAINTY REASONS (RECOMPUTED)</span>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
@@ -1030,30 +1687,29 @@ export default function PolicyDemoPage() {
                       </div>
                     </div>
 
-                    {/* Contract explanation */}
                     <div
                       style={{
-                        background: "#e8eee6",
-                        border: "1px solid #d5e0d4",
-                        borderRadius: 2,
-                        padding: "10px 14px",
-                        fontSize: 11,
-                        color: "#315b47",
+                        background: "#f0fdf4",
+                        border: "1px solid #dcfce7",
+                        borderLeft: "4px solid #16583e",
+                        borderRadius: 8,
+                        padding: "12px 16px",
+                        fontSize: 12,
+                        color: "#16583e",
                         lineHeight: 1.6,
                       }}
                     >
                       <b>Contract enforcement:</b> {challenge.contract_enforcement.explanation}
                     </div>
 
-                    {/* Differentiator takeaway */}
                     <div
                       style={{
-                        background: "#e3ede7",
-                        border: "1px solid #c5d9cc",
-                        borderRadius: 2,
-                        padding: "12px 16px",
-                        fontSize: 12,
-                        color: "#285f4d",
+                        background: "#fffbeb",
+                        border: "1px solid #fef3c7",
+                        borderRadius: 8,
+                        padding: "14px 18px",
+                        fontSize: 13,
+                        color: "#92400e",
                         lineHeight: 1.65,
                         fontFamily: "Georgia,'Times New Roman',serif",
                         fontStyle: "italic",
@@ -1066,59 +1722,54 @@ export default function PolicyDemoPage() {
               </div>
             </div>
 
-            {/* ──────────────────────────────────────────────────────────────
-                SECTION 5: Audit Trail
-            ────────────────────────────────────────────────────────────── */}
             <SectionHeading
               num="05 — AUDIT TRAIL"
-              title="Investigation timeline (in-memory audit log)"
+              title="Investigation timeline (in-memory session audit log)"
             />
 
-            {/* Ephemeral in-memory notice */}
             <div
               style={{
                 marginBottom: 16,
-                padding: "12px 16px",
-                background: "#f4f3ee",
-                border: "1px solid #d5dad1",
-                borderRadius: 2,
-                fontSize: 11,
-                color: "#57645b",
+                padding: "14px 18px",
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
+                borderRadius: 8,
+                fontSize: 12,
+                color: "var(--ink-secondary)",
                 lineHeight: 1.6,
               }}
             >
-              <b>In-Memory Audit Notice:</b> This investigation session maintains an in-memory,
-              append-only audit log. The trail is ephemeral (held only in server memory for this
-              active session) and is reset when starting a new investigation, switching scenarios, or
-              restarting the process. No database persistence or local storage is used.
+              <b>In-Memory Audit Notice:</b> This investigation session maintains an ephemeral, append-only audit log
+              (<code>storage_mode: ephemeral_in_memory</code>, max 20 events). It resets when starting a new
+              investigation, switching scenarios, or restarting the server process.
             </div>
 
-            {/* Session Status & Reset Strip */}
             <div
               style={{
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "center",
                 flexWrap: "wrap",
-                gap: 12,
-                marginBottom: 16,
-                padding: "10px 14px",
-                background: "#fbfaf6",
-                border: "1px solid #e1e0d8",
-                borderRadius: 2,
+                gap: 14,
+                marginBottom: 20,
+                padding: "16px 20px",
+                background: "#ffffff",
+                border: "1px solid var(--line)",
+                borderRadius: 12,
+                boxShadow: "var(--shadow-sm)",
               }}
             >
-              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "center" }}>
                 <div>
                   <span style={labelStyle}>SESSION ID</span>
-                  <span
-                    style={{
-                      fontFamily: "ui-monospace,monospace",
-                      fontSize: 11,
-                      color: "#27322f",
-                    }}
-                  >
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 700, color: "var(--ink)" }}>
                     {sessionId ? `${sessionId.slice(0, 8)}…${sessionId.slice(-4)}` : "—"}
+                  </span>
+                </div>
+                <div>
+                  <span style={labelStyle}>CREATED AT (ISO)</span>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ink-secondary)" }}>
+                    {sessionCreatedAtIso ? new Date(sessionCreatedAtIso).toLocaleTimeString() : "—"}
                   </span>
                 </div>
                 <div>
@@ -1128,7 +1779,7 @@ export default function PolicyDemoPage() {
                 <div>
                   <span style={labelStyle}>CHALLENGES RECORDED</span>
                   <Badge
-                    text={`${historyEvents.length}`}
+                    text={`${historyEvents.length} / 20`}
                     color={historyEvents.length > 0 ? "orange" : "muted"}
                   />
                 </div>
@@ -1139,37 +1790,16 @@ export default function PolicyDemoPage() {
                 onClick={startNewInvestigation}
                 disabled={resetting || (!challenge && historyEvents.length === 0)}
                 aria-busy={resetting}
-                style={{ fontSize: 11 }}
+                style={{ fontSize: 12 }}
               >
                 {resetting ? "Resetting…" : "Start New Investigation"} <span>↺</span>
               </button>
             </div>
 
-            <ol
-              style={{
-                listStyle: "none",
-                margin: "8px 0 0",
-                padding: "0 0 0 8px",
-                borderLeft: "1px solid #cfd4ca",
-              }}
-            >
-              {/* Event 0: Baseline investigation */}
-              <li style={{ position: "relative", padding: "0 0 22px 22px" }}>
-                <span
-                  style={{
-                    position: "absolute",
-                    left: -5,
-                    top: 3,
-                    width: 9,
-                    height: 9,
-                    background: "#668672",
-                    border: "2px solid #f4f3ee",
-                    borderRadius: "50%",
-                    boxShadow: "0 0 0 1px #668672",
-                    display: "block",
-                  }}
-                />
-                <div>
+            <ol className="audit-timeline">
+              <li className="audit-timeline-item">
+                <span className="audit-timeline-node baseline" />
+                <div className="audit-timeline-card">
                   <div
                     style={{
                       display: "flex",
@@ -1178,91 +1808,50 @@ export default function PolicyDemoPage() {
                       alignItems: "center",
                     }}
                   >
-                    <b style={{ fontSize: 11, color: "#285f4d" }}>
+                    <b style={{ fontSize: 12.5, color: "#16583e" }}>
                       Baseline scenario loaded — initial proposal established
                     </b>
                     <Badge text="BASELINE" color="green" />
                   </div>
                   <p
                     style={{
-                      fontFamily: "ui-monospace,monospace",
-                      fontSize: 10,
-                      color: "#69756b",
-                      margin: "5px 0 0",
+                      fontFamily: "var(--mono)",
+                      fontSize: 11,
+                      color: "var(--ink-secondary)",
+                      margin: 0,
                     }}
                   >
-                    Scenario: {selectedScenarioId} · Proposed relation:{" "}
-                    {scenario.proposed_relation} · Status: {scenario.status} · Core:{" "}
-                    {scenario.core_classification}
+                    Scenario: {selectedScenarioId} · Proposed relation: {scenario.proposed_relation} · Status:{" "}
+                    {scenario.status} · Core: {scenario.core_classification}
                   </p>
                 </div>
               </li>
 
-              {/* Empty state when no challenges have been run yet */}
               {historyEvents.length === 0 && (
-                <li style={{ position: "relative", padding: "0 0 16px 22px" }}>
-                  <span
-                    style={{
-                      position: "absolute",
-                      left: -4,
-                      top: 4,
-                      width: 7,
-                      height: 7,
-                      background: "#e1e0d8",
-                      border: "1px solid #9da79b",
-                      borderRadius: "50%",
-                      display: "block",
-                    }}
-                  />
+                <li className="audit-timeline-item">
+                  <span className="audit-timeline-node" />
                   <div
                     style={{
-                      padding: "10px 14px",
+                      padding: "14px 18px",
                       background: "#faf9f4",
                       border: "1px dashed #d5dad1",
-                      borderRadius: 2,
-                      fontSize: 11,
-                      color: "#758078",
+                      borderRadius: 8,
+                      fontSize: 12,
+                      color: "var(--ink-tertiary)",
                       fontFamily: "Georgia,'Times New Roman',serif",
                       fontStyle: "italic",
                     }}
                   >
-                    No challenges recorded yet in this session. The baseline investigation proposal
-                    remains uncontradicted. Select a department in Section 04 and submit a challenge
-                    to record an immutable audit entry.
+                    No challenges recorded yet in this session. Select a department in Section 04 and submit a
+                    challenge to record an audit entry.
                   </div>
                 </li>
               )}
 
-              {/* Dynamic consecutive challenges from session manager */}
               {historyEvents.map((evt) => (
-                <li
-                  key={evt.sequence_number}
-                  style={{ position: "relative", padding: "0 0 24px 22px" }}
-                >
-                  <span
-                    style={{
-                      position: "absolute",
-                      left: -5,
-                      top: 3,
-                      width: 9,
-                      height: 9,
-                      background: "#b45c37",
-                      border: "2px solid #f4f3ee",
-                      borderRadius: "50%",
-                      boxShadow: "0 0 0 1px #b45c37",
-                      display: "block",
-                    }}
-                  />
-                  <div
-                    style={{
-                      display: "grid",
-                      gap: 8,
-                      background: "#fbfaf6",
-                      border: "1px solid #e3e2da",
-                      borderRadius: 2,
-                      padding: "12px 16px",
-                    }}
-                  >
+                <li key={evt.sequence_number} className="audit-timeline-item">
+                  <span className="audit-timeline-node challenge" />
+                  <div className="audit-timeline-card">
                     <div
                       style={{
                         display: "flex",
@@ -1274,34 +1863,21 @@ export default function PolicyDemoPage() {
                     >
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <Badge text={`ENTRY #${evt.sequence_number}`} color="orange" />
-                        <b style={{ fontSize: 12, color: "#27322f" }}>
+                        <b style={{ fontSize: 13, color: "var(--ink)" }}>
                           Reviewer Challenge: {evt.target_department} ({evt.target_side})
                         </b>
                       </div>
-                      <span
-                        style={{
-                          fontFamily: "ui-monospace,monospace",
-                          fontSize: 9,
-                          color: "#858c84",
-                        }}
-                      >
+                      <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--ink-tertiary)" }}>
                         {evt.timestamp_iso}
                       </span>
                     </div>
 
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-                      <span style={{ fontSize: 11, color: "#57645b" }}>Applicability:</span>
+                      <span style={{ fontSize: 11.5, color: "var(--ink-secondary)" }}>Applicability:</span>
                       <Badge text={evt.applicability_status} color="orange" />
-                      <span style={{ fontSize: 11, color: "#57645b", marginLeft: 6 }}>
-                        Relation shift:
-                      </span>
-                      <Badge
-                        text={`${evt.initial_relation} → ${evt.recomputed_relation}`}
-                        color="review"
-                      />
-                      <span style={{ fontSize: 11, color: "#57645b", marginLeft: 6 }}>
-                        Core classification:
-                      </span>
+                      <span style={{ fontSize: 11.5, color: "var(--ink-secondary)", marginLeft: 6 }}>Relation shift:</span>
+                      <Badge text={`${evt.initial_relation} → ${evt.recomputed_relation}`} color="review" />
+                      <span style={{ fontSize: 11.5, color: "var(--ink-secondary)", marginLeft: 6 }}>Core classification:</span>
                       <Badge text={evt.core_classification} color="orange" />
                       <Badge
                         text={`contract_enforced: ${evt.contract_enforced}`}
@@ -1311,7 +1887,7 @@ export default function PolicyDemoPage() {
 
                     <div>
                       <span style={labelStyle}>UNCERTAINTY REASONS</span>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
                         {evt.uncertainty_reasons.map((r) => (
                           <Badge key={r} text={r} color="muted" />
                         ))}
@@ -1321,11 +1897,11 @@ export default function PolicyDemoPage() {
                     <p
                       style={{
                         margin: 0,
-                        fontSize: 11,
-                        color: "#4f5a52",
+                        fontSize: 12,
+                        color: "var(--ink-secondary)",
                         fontFamily: "Georgia,'Times New Roman',serif",
                         fontStyle: "italic",
-                        lineHeight: 1.5,
+                        lineHeight: 1.55,
                       }}
                     >
                       "{evt.summary}"

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --configLoader runner --host 127.0.0.1 --port 5174",
     "build": "tsc -b && vite build --configLoader runner",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/audit_remediation.test.ts"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
