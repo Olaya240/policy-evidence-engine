@@ -1,9 +1,10 @@
 # Scope layer and truth interval — what landed, what it cost, what it proves
 
 2026-11-02. Two changes to the reader (scope) and two to the report (interval),
-plus one proof file. **Suite: 5081 passed, 14 xfailed, 0 failed.** Committed as
-`864a674` and pushed to `origin/fix/evidence-decision-table`; the working tree is
-clean at that commit, and the tree the suite ran on is the tree that was pushed.
+plus one proof file. **Suite: 5081 passed, 14 xfailed, 0 failed.** Committed on
+`fix/evidence-decision-table` and pushed to `origin`; the working tree is clean, and
+the tree the suite ran on is the tree that was pushed. The branch is named rather
+than the commit because a SHA in a document goes stale with the next follow-up.
 
 The wave was asked to make the backend "extremely advanced and engineeringly
 perfect". This note records where that is now true, where it is still not, and
