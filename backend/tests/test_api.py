@@ -380,7 +380,7 @@ def test_each_preset_identity_survives_challenge_retrieval_and_history(
     assert [claim["hypothesis_id"] for claim in created_body["claims"]] == [hypothesis_id]
     initial_trace = created_body["claims"][0]["explanation_trace"]
     assert initial_trace["trace_schema_version"] == "1.0"
-    assert initial_trace["confidence_kind"] == "FIXED_ENGINE_HEURISTIC_NOT_CALIBRATED_PROBABILITY"
+    assert initial_trace["confidence_kind"] == "SIGNED_EVIDENCE_MARGIN_NOT_CALIBRATED_PROBABILITY"
     assert provider.assessment_history == (hypothesis_id,)
 
     challenge = client.post(
@@ -495,7 +495,7 @@ def test_uninitialized_database_returns_controlled_error_without_creating_file(m
         with InProcessClient(app) as test_client:
             response = test_client.get("/api/records")
         assert response.status_code == 503
-        assert response.json() == {"detail": "Local prototype database is not initialized. See hackathon/README.md."}
+        assert response.json() == {"detail": "Local prototype database is not initialized. Run `PYTHONPATH=backend python -m app.store init` from the repository root (see README.md)."}
         assert not db_path.exists()
     finally:
         _remove_sqlite_files(db_path)
@@ -933,7 +933,7 @@ def test_challenge_recomputes_claim_with_only_unverified_source_dependency_and_r
     assert related_evidence["review_state"] == "UNVERIFIED"
     assert related_before["dependencies"] == [source.id]
     assert related_before["status"] == "INSUFFICIENT"
-    assert related_before["confidence"] == 0.2
+    assert related_before["confidence"] == 0.0
 
     response = client.post(
         f"/api/investigations/{investigation_id}/claims/{target_id}/challenge",

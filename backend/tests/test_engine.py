@@ -130,10 +130,12 @@ def test_stale_contradiction_is_reported_without_being_counted_as_fresh(fresh_st
     now = datetime.now(timezone.utc)
     fresh = Evidence(source_record_id="CURRENT", timestamp=now, quote="current", stance=fresh_stance, rationale="current", department="Front Office")
     stale = Evidence(source_record_id="OLD-OPPOSITE", timestamp=now-timedelta(days=365), quote="old opposite", stance=Stance.CONTRADICTS if fresh_stance == Stance.SUPPORTS else Stance.SUPPORTS, rationale="historical", department="Front Office", stale=True)
-    status, _, uncertainty, conflicts, _ = summarize_status([fresh, stale])
-    assert status == Status.PARTIAL
-    assert summarize_status([fresh, stale])[1] == 0.54
-    assert "stale" in uncertainty
+    status, confidence, uncertainty, conflicts, _ = summarize_status([fresh, stale])
+    fresh_only = summarize_status([fresh])
+    # The stale record only describes history: it cannot change the status or
+    # the number. This is the `v2_stale_ignored` property in the engine.
+    assert (status, confidence, uncertainty) == fresh_only[0:3]
+    assert status == (Status.PARTIAL if fresh_stance == Stance.SUPPORTS else Status.CONTRADICTED)
     assert any("OLD-OPPOSITE" in item and "historical context" in item for item in conflicts)
 
 
@@ -172,7 +174,8 @@ def test_stale_unverified_contradiction_does_not_change_supported_status_or_conf
 
     result = summarize_status([*accepted_support, stale_unverified_contradiction])
 
-    assert baseline[0:2] == (Status.SUPPORTED, 0.78)
+    assert baseline[0] == Status.SUPPORTED
+    assert baseline[1] == pytest.approx(2 / 3)
     assert result[0:2] == baseline[0:2]
     assert any("UNVERIFIED-OLD-CONTRADICTION" in item for item in result[3])
 
@@ -187,7 +190,8 @@ def test_stale_unverified_support_does_not_change_contradiction_status_or_confid
 
     result = summarize_status([accepted_contradiction, stale_unverified_support])
 
-    assert baseline[0:2] == (Status.CONTRADICTED, 0.58)
+    assert baseline[0] == Status.CONTRADICTED
+    assert baseline[1] == pytest.approx(0.5)
     assert result[0:2] == baseline[0:2]
     assert any("UNVERIFIED-OLD-SUPPORT" in item for item in result[3])
 
@@ -205,7 +209,8 @@ def test_fresh_unverified_evidence_does_not_change_status_or_confidence_and_is_a
 
     result = summarize_status([accepted_support, unverified])
 
-    assert baseline[0:2] == (Status.PARTIAL, 0.55)
+    assert baseline[0] == Status.PARTIAL
+    assert baseline[1] == pytest.approx(0.5)
     assert result[0:2] == baseline[0:2]
     assert any("unverified proposals" in item.casefold() for item in result[3])
     assert any(unverified.source_record_id in item for item in result[3])
@@ -223,7 +228,9 @@ def test_only_fresh_unverified_evidence_has_same_status_and_confidence_as_no_evi
     baseline = summarize_status([])
     result = summarize_status([unverified])
 
-    assert result[0:2] == baseline[0:2] == (Status.INSUFFICIENT, 0.2)
+    assert result[0:2] == baseline[0:2]
+    assert result[0] == Status.INSUFFICIENT
+    assert result[1] == pytest.approx(0.0)
     assert any(unverified.source_record_id in item for item in result[3])
 
 
@@ -241,7 +248,8 @@ def test_stale_unverified_only_does_not_change_empty_status_or_confidence(stance
 
     result = summarize_status([stale_unverified])
 
-    assert baseline[0:2] == (Status.INSUFFICIENT, 0.2)
+    assert baseline[0] == Status.INSUFFICIENT
+    assert baseline[1] == pytest.approx(0.0)
     assert result[0:2] == baseline[0:2]
     assert any("unverified proposals" in item.casefold() for item in result[3])
     assert any(stale_unverified.source_record_id in item for item in result[3])
@@ -271,7 +279,10 @@ def test_stale_accepted_contradiction_behavior_is_unchanged_by_unverified_eviden
 
     result = summarize_status([*accepted_evidence, unverified])
 
-    assert baseline[0:2] == (Status.PARTIAL, 0.54)
+    # One fresh support, one stale contradiction: the stale record is context,
+    # so the shape is a single fresh source.
+    assert baseline[0] == Status.PARTIAL
+    assert baseline[1] == pytest.approx(0.5)
     assert result[0:2] == baseline[0:2]
     assert any("unverified proposals" in item.casefold() for item in result[3])
     assert any(source_id in item for item in result[3])
@@ -293,7 +304,8 @@ def test_both_unverified_stances_do_not_change_accepted_status_or_confidence():
         accepted_support, unverified_support, unverified_contradiction,
     ])
 
-    assert baseline[0:2] == (Status.PARTIAL, 0.55)
+    assert baseline[0] == Status.PARTIAL
+    assert baseline[1] == pytest.approx(0.5)
     assert result[0:2] == baseline[0:2]
     assert any("unverified proposals" in item.casefold() for item in result[3])
     assert any(unverified_support.source_record_id in item for item in result[3])
@@ -396,7 +408,7 @@ def test_semantic_guard_disabled_accepts_unmatched_proposal_and_default_applicat
     assert disabled_evidence["review_state"] == EvidenceReviewState.ACCEPTED.value
     assert disabled_evidence["proposed_stance"] is None
     assert disabled["status"] == Status.PARTIAL.value
-    assert disabled["confidence"] == 0.55
+    assert disabled["confidence"] == 0.5
     assert not any("unverified proposals" in item.casefold() for item in disabled["conflicts"])
 
     enabled = AssessmentEngine(provider).assess_hypothesis(
@@ -406,7 +418,7 @@ def test_semantic_guard_disabled_accepts_unmatched_proposal_and_default_applicat
     assert enabled_evidence["review_state"] == EvidenceReviewState.UNVERIFIED.value
     assert enabled_evidence["proposed_stance"] == Stance.SUPPORTS.value
     assert enabled["status"] == Status.INSUFFICIENT.value
-    assert enabled["confidence"] == 0.2
+    assert enabled["confidence"] == 0.0
     assert any("unverified proposals" in item.casefold() for item in enabled["conflicts"])
 
     from app.main import engine as application_engine
@@ -558,9 +570,9 @@ def test_unverified_legacy_support_does_not_override_explicit_contradiction_on_c
     "quote,stance,expected_state,expected_status,expected_confidence,has_review_annotation",
     [
         ("The checklist was unavailable during handover.", Stance.SUPPORTS,
-         EvidenceReviewState.ACCEPTED, Status.PARTIAL, 0.55, False),
+         EvidenceReviewState.ACCEPTED, Status.PARTIAL, 0.5, False),
         ("A desk lamp was replaced before dinner.", Stance.SUPPORTS,
-         EvidenceReviewState.UNVERIFIED, Status.INSUFFICIENT, 0.2, True),
+         EvidenceReviewState.UNVERIFIED, Status.INSUFFICIENT, 0.0, True),
     ],
     ids=["guard-accepts-matching-cue", "guard-abstains-on-unmatched-cue"],
 )

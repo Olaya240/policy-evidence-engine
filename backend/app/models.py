@@ -1,7 +1,7 @@
 """API schemas and typed domain models."""
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -63,7 +63,9 @@ INVESTIGATION_PRESET_HYPOTHESES = {
 
 
 class Evidence(BaseModel):
-    source_record_id: str
+    # Empty ids are the identity field of a citation: an evidence row that cites
+    # nothing cannot be grounded, traced, or challenged.
+    source_record_id: str = Field(min_length=1)
     timestamp: datetime
     quote: str
     stance: Stance
@@ -82,7 +84,17 @@ class Claim(BaseModel):
     id: str
     hypothesis_id: str
     status: Status
+    # Magnitude of the evidence margin, kept for existing consumers. It cannot
+    # distinguish one source for from one source against; the sign is carried by
+    # `evidence_score` and `evidence_direction` below.
     confidence: float = Field(ge=0, le=1)
+    # Additive, signed view of the same decision (range (-1, 1), 0 = no net
+    # direction). Optional and defaulted, following `explanation_trace`, so rows
+    # persisted before the signed table existed still validate unchanged. No
+    # bound is enforced here on purpose: a constraint added later must not be
+    # able to reject a stored snapshot.
+    evidence_score: Optional[float] = None
+    evidence_direction: Optional[Literal["FOR", "AGAINST", "NONE"]] = None
     uncertainty: str
     summary: str
     evidence: list[Evidence]
@@ -102,15 +114,23 @@ class InvestigationCreate(BaseModel):
     # supported presets always provide this server-validated selector.
     preset_id: Optional[InvestigationPreset] = None
 
-    @field_validator("question")
+    # `mode="before"` so `min_length` measures the stripped value: otherwise
+    # "        x" passed the length bound and was then stored as "x".
+    @field_validator("question", mode="before")
     @classmethod
-    def non_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Question must not be blank")
-        return value.strip()
+    def non_blank(cls, value: object) -> object:
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("Question must not be blank")
+            return value.strip()
+        return value
 
 
 class ChallengeCreate(BaseModel):
+    # Same contract as InvestigationCreate: a caller sending an unknown field is
+    # told so instead of having it silently dropped.
+    model_config = ConfigDict(extra="forbid")
+
     reason: str = Field(min_length=8, max_length=1000)
     source_record_id: str = Field(min_length=1, max_length=80)
     quote: str = Field(min_length=3, max_length=1000)
@@ -121,6 +141,76 @@ class ChallengeCreate(BaseModel):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("Challenge reason must not be blank")
         return value.strip()
+
+
+# Ingestion MVP bound: one plain-text document per request. Sized for a shift
+# note or a pasted paragraph, not a file. The bound is enforced by the schema, so
+# an oversized body is a 422 before SQLite is touched rather than a stored or
+# truncated row.
+INGEST_TEXT_MAX_CHARS = 20_000
+INGEST_TAG_MAX_CHARS = 40
+INGEST_TAG_LIMIT = 20
+
+
+class IngestCreate(BaseModel):
+    """One text document to store as a record.
+
+    Scope, deliberately: text only. No file upload, no PDF/DOCX extraction, no
+    new dependency, no environment variable or flag. The document becomes a
+    `Record`, so it flows through the same table, visibility filter and clock as
+    the rest of the API.
+
+    `restricted` must never appear here: a client that could set it would write a
+    row it cannot then read. The field is absent and `extra="forbid"` turns an
+    attempt to send it into a 422.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=INGEST_TEXT_MAX_CHARS)
+    department: str = Field(min_length=1, max_length=80)
+    # Absent means "stamp it with the write clock" (see app/ingest.py); the
+    # injection point is the clock argument, never a call to datetime.now().
+    timestamp: Optional[datetime] = None
+    source_group: Optional[str] = Field(default=None, max_length=80)
+    tags: list[str] = Field(default_factory=list, max_length=INGEST_TAG_LIMIT)
+
+    # `mode="before"` so the length bounds measure the stripped value: otherwise
+    # "   x" satisfied min_length and was then stored as "x".
+    @field_validator("text", "department", mode="before")
+    @classmethod
+    def non_blank(cls, value: object) -> object:
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("Ingested text and department must not be blank")
+            return value.strip()
+        return value
+
+    @field_validator("source_group", mode="before")
+    @classmethod
+    def blank_source_group_is_absent(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def bounded_tags(cls, value: object) -> object:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return value
+        cleaned = []
+        for tag in value:
+            if not isinstance(tag, str):
+                return value
+            stripped = tag.strip()
+            if not stripped:
+                raise ValueError("Tags must not be blank")
+            if len(stripped) > INGEST_TAG_MAX_CHARS:
+                raise ValueError(f"Tags must be at most {INGEST_TAG_MAX_CHARS} characters")
+            cleaned.append(stripped)
+        return cleaned
 
 
 class Record(BaseModel):

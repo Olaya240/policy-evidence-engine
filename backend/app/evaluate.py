@@ -2,6 +2,8 @@
 import json
 import os
 import inspect
+import re
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,10 +17,56 @@ from .mock_provider import MockProvider
 from .models import Record
 from .provider_safety import SYSTEM_INSTRUCTIONS, serialize_provider_request
 from .experiment_control import ExperimentControlError, ExperimentRunController
-from .experiment_manifest import AttemptMetadata, ExperimentRunManifest, sha256_hex
+from .experiment_manifest import UNKNOWN, AttemptMetadata, ExperimentRunManifest, sha256_hex
 
 DATASET_PATH = Path(__file__).resolve().parents[1] / "evaluation" / "gold_cases.json"
 EVALUATION_AS_OF = datetime(2026, 10, 27, 12, tzinfo=timezone.utc)
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+# Only the code this harness executes: the package under test and the checked-in
+# gold set. A change anywhere here means the working copy is not HEAD.
+_REVISION_SUBJECTS = ("backend/app", "backend/evaluation")
+_REVISION = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+# The offline harness answers with `MockProvider` only, so that class is the
+# model of record. It is read from the class that is actually constructed rather
+# than asserted. The provider defines no version of its own and performs no
+# sampling, so version is the explicit unknown and the decoding fields stay null
+# (null meaning "not applicable here", never a plausible-looking number).
+MODEL_NAME = MockProvider.__name__
+MODEL_VERSION = UNKNOWN
+
+
+def _git(*args: str) -> str | None:
+    """Read one fact from the checkout's git metadata, or None if unreadable."""
+    try:
+        completed = subprocess.run(
+            ["git", *args], cwd=_REPO_ROOT, capture_output=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.decode("utf-8", "replace").strip()
+
+
+def code_revision() -> str:
+    """The revision the evaluated code came from, or the explicit `"unknown"`.
+
+    HEAD alone is not the answer when tracked or untracked files under the
+    evaluated paths differ from it, so an uncommitted tree is reported as
+    `<sha>-dirty`: the commit this copy is based on plus the observed fact that
+    it is not that commit. Git being absent, the directory not being a checkout,
+    or a HEAD that is not a revision all yield `"unknown"` rather than a value
+    that merely looks like one.
+    """
+    head = _git("rev-parse", "--verify", "HEAD")
+    if head is None or _REVISION.fullmatch(head) is None:
+        return UNKNOWN
+    status = _git("status", "--porcelain", "--untracked-files=all", "--", *_REVISION_SUBJECTS)
+    if status is None:
+        return UNKNOWN
+    return f"{head}-dirty" if status else head
 
 
 class EvaluationDateTime(datetime):
@@ -54,10 +102,17 @@ def _evaluate_recomputation_history(guarded: bool) -> dict[str, Any]:
     try:
         store.initialize_database()
         records = store.list_records()
-        engine = AssessmentEngine(semantic_guard=guarded)
+        # The clock is injected for the whole run, not just around `investigate`:
+        # patching `app.engine.datetime` only inside the first call left the
+        # challenge recomputations on the real clock, which is why
+        # `same_input_same_recomputation` failed on a deterministic engine.
+        engine = AssessmentEngine(semantic_guard=guarded, clock=lambda: EVALUATION_AS_OF)
         with patch("app.engine.datetime", EvaluationDateTime):
             initial_claims = engine.investigate(records)
-        created = store.create_investigation("Phase 3.6 deterministic history evaluation", initial_claims)
+        # The run is evaluated as of a frozen instant, so the rows it writes must
+        # carry that instant rather than the wall clock at the moment of writing.
+        created = store.create_investigation("Phase 3.6 deterministic history evaluation", initial_claims,
+                                             clock=lambda: EVALUATION_AS_OF)
         initial = store.get_investigation(created["id"])
         source_id = "OPS-101"
         source = next(record for record in records if record.id == source_id)
@@ -77,6 +132,7 @@ def _evaluate_recomputation_history(guarded: bool) -> dict[str, Any]:
             created["id"], target_id, "Evaluation fixture challenge.", source_id,
             "binder was missing", expected_revision=snapshot["revision"],
             expected_claims=snapshot["claims"], revised_claims=revised,
+            clock=lambda: EVALUATION_AS_OF,
         )
         current = store.get_investigation(created["id"])
         history = store.get_history(created["id"])
@@ -152,12 +208,16 @@ def run_evaluation(*, guarded: bool = True, failure_injector=None) -> dict[str, 
     manifest = ExperimentRunManifest(
         run_id=run_controller.run_id,
         dataset_sha256=sha256_hex(raw_dataset),
-        code_revision=None,
+        code_revision=code_revision(),
         prompt_version="local-instructions-v1",
         prompt_sha256=prompt_digest,
         serializer_version="allowlist-json-v1",
         serializer_sha256=serializer_digest,
         evaluator_version="3.16.0",
+        model_name=MODEL_NAME,
+        model_version=MODEL_VERSION,
+        temperature=None,
+        seed=None,
     )
     contract_cases = [case for case in cases if case.get("expected_rejection_code")]
 
@@ -167,6 +227,7 @@ def run_evaluation(*, guarded: bool = True, failure_injector=None) -> dict[str, 
         engine = AssessmentEngine(provider, semantic_guard=guarded)
         expected_rejection = case.get("expected_rejection_code")
         started = time.perf_counter()
+        requests_before = run_controller.request_count
         claim = None
         observed_rejection = None
         if expected_rejection:
@@ -208,12 +269,15 @@ def run_evaluation(*, guarded: bool = True, failure_injector=None) -> dict[str, 
             # Never retain exception text: it could contain record or prompt data.
             error_category = "unexpected_exception"
         latency_ms = max(0, int((time.perf_counter() - started) * 1000))
+        # Per-case accounting: the run-wide counter says nothing about what this
+        # attempt cost, and a refused case reserves nothing at all.
+        requests_used = run_controller.request_count - requests_before
         if error_category:
             provider_errors.append(error_category)
             if case["id"] in semantic_case_id_set:
                 semantic_error_case_ids.append(case["id"])
             manifest.add_attempt(AttemptMetadata(
-                case_id=case["id"], request_count=run_controller.request_count,
+                case_id=case["id"], request_count=requests_used,
                 latency_ms=latency_ms, error_category=(error_category if error_category in {
                     "timeout", "provider_failure", "malformed_response", "malformed_output",
                     "invalid_source", "invalid_quote", "invalid_stance", "invalid_rationale",
@@ -225,7 +289,7 @@ def run_evaluation(*, guarded: bool = True, failure_injector=None) -> dict[str, 
                                  "assessment_calls": 1})
             continue
 
-        manifest.add_attempt(AttemptMetadata(case_id=case["id"], request_count=run_controller.request_count, latency_ms=latency_ms))
+        manifest.add_attempt(AttemptMetadata(case_id=case["id"], request_count=requests_used, latency_ms=latency_ms))
         observed_proposals = [item.get("proposed_stance") or item["stance"] for item in claim["evidence"]]
         # Only locally accepted stances count as semantic assessment output.
         # Unverified proposals remain visible for review and score as missing.
@@ -371,6 +435,9 @@ def run_evaluation(*, guarded: bool = True, failure_injector=None) -> dict[str, 
         },
         "deterministic_recomputation_history_consistency": recomputation,
     }
+    # Seal before serialising: the record cannot be extended afterwards, and a
+    # run that recorded no attempt cannot be published as a run record.
+    manifest.seal()
     metrics["experiment_manifest"] = manifest.to_dict()
     return {
         "evaluation": dataset["title"],

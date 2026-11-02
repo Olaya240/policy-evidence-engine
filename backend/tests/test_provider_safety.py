@@ -572,7 +572,9 @@ def test_engine_rejects_unsupported_provider_bypass_and_raw_payload():
     direct_transport = FakeTransport()
     with pytest.raises(ProviderSafetyError) as direct_error:
         asyncio.run(bounded_provider_call(direct_transport, _request()))
-    assert direct_error.value.code == "unsupported_transport"
+    # The failing argument is a provider, not a transport; the code was renamed
+    # so a bad provider cannot read as a transport fault.
+    assert direct_error.value.code == "unsupported_provider"
     assert direct_transport.calls == 0
 
     transport = FakeTransport()

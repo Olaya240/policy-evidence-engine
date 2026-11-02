@@ -1,23 +1,196 @@
 """FastAPI local API. Does not initialize the database or make network calls."""
+import json
+import logging
+import os
+from collections.abc import Mapping
 from copy import deepcopy
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .access import visible_records
 from .engine import AssessmentEngine, AssessmentError, ProviderError
-from .models import (ChallengeCreate, HistoryEntry, Investigation,
+from .models import (ChallengeCreate, HistoryEntry, IngestCreate, Investigation,
                      InvestigationCreate, InvestigationPreset,
                      INVESTIGATION_PRESET_HYPOTHESES,
                      INVESTIGATION_PRESET_QUESTIONS, Record)
-from . import store
+from .provider_activation import (BASETEN_API_KEY_ENV_VAR,
+                                 ProviderActivationError,
+                                 create_assessment_engine)
+from .provider_safety import ProviderBudgetConfig
+from .rate_limit import TokenBucketRateLimiter
+from . import ingest, store
+
+logger = logging.getLogger(__name__)
+
+# Activation is opt-in through the environment and default-off. The flag is
+# necessary but never sufficient: the key and every budget input must also be
+# supplied, so no credential or misconfiguration can switch the network
+# provider on by itself.
+ACTIVATE_BASETEN_ENV_VAR = "ENABLE_BASETEN"
+BASETEN_MAX_REQUESTS_ENV_VAR = "BASETEN_MAX_REQUESTS"
+BASETEN_MAX_ESTIMATED_COST_ENV_VAR = "BASETEN_MAX_ESTIMATED_COST_USD"
+BASETEN_CONSERVATIVE_COST_ENV_VAR = "BASETEN_CONSERVATIVE_COST_PER_REQUEST_USD"
+_ACTIVATION_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
+_ACTIVATION_DISABLED_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+
+def _activation_requested(environ: Mapping[str, str]) -> bool:
+    """Read the flag as an explicit literal; an unrecognised value is off."""
+    raw = environ.get(ACTIVATE_BASETEN_ENV_VAR)
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value in _ACTIVATION_ENABLED_VALUES:
+        return True
+    if value in _ACTIVATION_DISABLED_VALUES:
+        return False
+    logger.warning(
+        "%s is not a recognised activation value; serving the mock provider. "
+        "Set it to one of %s to request Baseten activation.",
+        ACTIVATE_BASETEN_ENV_VAR, sorted(_ACTIVATION_ENABLED_VALUES))
+    return False
+
+
+def _budget_from_environment(environ: Mapping[str, str]) -> ProviderBudgetConfig | None:
+    """Return the explicit budget, or None when any of its inputs is absent or malformed."""
+    max_requests = environ.get(BASETEN_MAX_REQUESTS_ENV_VAR)
+    ceiling = environ.get(BASETEN_MAX_ESTIMATED_COST_ENV_VAR)
+    per_request = environ.get(BASETEN_CONSERVATIVE_COST_ENV_VAR)
+    if not max_requests or not ceiling or not per_request:
+        return None
+    try:
+        parsed_requests = int(max_requests)
+    except (TypeError, ValueError):
+        return None
+    return ProviderBudgetConfig(
+        enabled=True,
+        max_requests=parsed_requests,
+        max_estimated_cost_usd=ceiling,
+        conservative_cost_per_request_usd=per_request,
+    )
+
+
+def _environment_key_source(environ: Mapping[str, str]):
+    """Hand the factory a callable instead of the secret, read only after validation."""
+    def key_source():
+        return environ[BASETEN_API_KEY_ENV_VAR]
+
+    return key_source
+
+
+def build_engine_from_environment(environ: Mapping[str, str]) -> AssessmentEngine:
+    """Compose the process engine: mock by default, Baseten only on explicit request.
+
+    The mock provider is the only default that needs no credentials. Baseten is
+    activated only when the flag names an affirmative literal, a key is present
+    in `BASETEN_API_KEY`, and the three budget inputs are supplied. No refusal or
+    failure escapes this function: the mock provider is returned and the reason
+    is logged, so activation can never happen by accident.
+    """
+    if not _activation_requested(environ):
+        if environ.get(BASETEN_API_KEY_ENV_VAR):
+            logger.warning(
+                "%s is set but %s is not enabled; serving the mock provider and "
+                "ignoring the key. Set %s=1 to request Baseten activation.",
+                BASETEN_API_KEY_ENV_VAR, ACTIVATE_BASETEN_ENV_VAR,
+                ACTIVATE_BASETEN_ENV_VAR)
+        return create_assessment_engine()
+
+    key_source = None
+    if environ.get(BASETEN_API_KEY_ENV_VAR):
+        key_source = _environment_key_source(environ)
+    try:
+        return create_assessment_engine(
+            activate_baseten=True,
+            key_source=key_source,
+            budget_config=_budget_from_environment(environ),
+        )
+    except ProviderActivationError as error:
+        logger.warning(
+            "Baseten provider activation was refused (%s); serving the mock provider.",
+            error.code)
+    except Exception:  # the composition root must never fail to start
+        logger.warning(
+            "Baseten provider activation failed unexpectedly; serving the mock provider.")
+    return create_assessment_engine()
+
 
 app = FastAPI(title="Story Connect Handover Investigation Prototype", version="0.1.0",
               description="Synthetic local decision support. Findings require human review; this is not production software.")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5174", "http://127.0.0.1:5174"],
+
+
+def _json_safe(value):
+    """Make a validation-error value renderable as UTF-8 JSON.
+
+    A lone surrogate is legal in a JSON escape and illegal in UTF-8. Starlette's
+    default validation handler echoes the offending input back through
+    `json.dumps(..., ensure_ascii=False).encode("utf-8")`, so a body containing
+    `\\ud800` raised `UnicodeEncodeError` inside the error handler itself — a 500
+    from a 422 path, reachable by any client.
+    """
+    try:
+        json.dumps(value, allow_nan=False)
+        return value
+    except (TypeError, ValueError):
+        return "<unrenderable>"
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request, exc: RequestValidationError):
+    errors = []
+    for error in exc.errors():
+        item = {
+            "loc": [str(part) for part in error.get("loc", ())],
+            "msg": error.get("msg", ""),
+            "type": error.get("type", ""),
+        }
+        if "input" in error:
+            item["input"] = _json_safe(error["input"])
+        errors.append(item)
+    # `json.dumps` here keeps `ensure_ascii=True`, so a surrogate is escaped rather
+    # than encoded, and a non-finite number cannot masquerade as JSON.
+    return Response(
+        content=json.dumps({"detail": errors}, allow_nan=False),
+        media_type="application/json",
+        status_code=422,
+    )
+
+
+app.add_middleware(
+    CORSMiddleware, allow_origins=["http://localhost:5174", "http://127.0.0.1:5174"],
                    allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
-engine = AssessmentEngine()
+engine = build_engine_from_environment(os.environ)
+
+# Threat row H8: nothing bounded request volume before this. The prototype is
+# single-user and local, so the limit is deliberately generous — it exists to stop
+# a runaway loop or a hostile local process, not to police a shared service. The
+# limiter is a module attribute so a test (or a deployment) can replace it without
+# touching the routes.
+rate_limiter = TokenBucketRateLimiter(limit=600, window_seconds=60.0)
+
+
+# Health is exempt. Metring it made the probe go 429 under exactly the load an
+# operator needs it for, so the flood suppressed the signal it was supposed to
+# describe; the route is a constant-size read with no database writes, so leaving
+# it unmetered costs nothing an attacker can use.
+_RATE_LIMIT_EXEMPT_PATHS = frozenset({"/api/health"})
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request, call_next):
+    if request.url.path in _RATE_LIMIT_EXEMPT_PATHS:
+        return await call_next(request)
+    decision = rate_limiter.check(request.client.host if request.client else "unknown")
+    if not decision.allowed:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests; retry later."},
+            headers={"Retry-After": decision.retry_after_header},
+        )
+    return await call_next(request)
 
 
 @app.exception_handler(store.DatabaseUnavailable)
@@ -26,7 +199,20 @@ async def database_unavailable_handler(_request, _exc: store.DatabaseUnavailable
 
 
 @app.exception_handler(ProviderError)
-async def provider_error_handler(_request, _exc: ProviderError) -> JSONResponse:
+async def provider_error_handler(_request: Request, exc: ProviderError) -> JSONResponse:
+    # `request_too_large` is raised before any provider call, when the eligible
+    # corpus cannot be serialised inside the bounded request. Reporting it as an
+    # outage told the client to retry something that can never succeed.
+    if exc.code == "request_too_large":
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "The evidence corpus exceeds the bounded provider request budget."},
+        )
+    if exc.code == "proposal_capacity_exceeded":
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "The evidence corpus exceeds the proposal budget for one assessment."},
+        )
     return JSONResponse(status_code=503, content={"detail": "Assessment provider is unavailable or returned invalid output."})
 
 
@@ -34,9 +220,9 @@ def require_database() -> None:
     try:
         path = store.database_path()
         if not path.is_file():
-            raise HTTPException(status_code=503, detail="Local prototype database is not initialized. See hackathon/README.md.")
+            raise HTTPException(status_code=503, detail="Local prototype database is not initialized. Run `PYTHONPATH=backend python -m app.store init` from the repository root (see README.md).")
     except (OSError, ValueError, store.DatabaseUnavailable):
-        raise HTTPException(status_code=503, detail="Local prototype database is not initialized. See hackathon/README.md.")
+        raise HTTPException(status_code=503, detail="Local prototype database is not initialized. Run `PYTHONPATH=backend python -m app.store init` from the repository root (see README.md).")
 
 
 def _prepare_investigation_response(investigation: dict) -> dict:
@@ -81,20 +267,35 @@ def _derive_preset_id(investigation: dict) -> InvestigationPreset | None:
 
 @app.get("/api/health")
 def health() -> dict:
+    # A rejected path and an uninitialised one are different states: the first is a
+    # configuration error that makes every data route 503, the second is a normal
+    # first run. Reporting both as "ok" made the health signal disagree with the
+    # availability it is supposed to describe.
+    misconfigured = False
     try:
         path = store.database_path()
         initialized = path.is_file()
-    except (OSError, ValueError):
+    except ValueError:
+        misconfigured = True
+        initialized = False
+    except OSError:
         initialized = False
     available = False
     if initialized:
         try:
             with store.connect() as db:
-                db.execute("SELECT 1").fetchone()
+                # `SELECT 1` is a constant expression: SQLite answers it without
+                # reading the file header, so a corrupt database reported healthy.
+                # `PRAGMA schema_version` reads page 1 and fails loudly instead.
+                db.execute("PRAGMA schema_version").fetchone()
             available = True
         except store.DatabaseUnavailable:
             pass
-    return {"status": "ok" if not initialized or available else "degraded", "prototype": True, "synthetic_data_only": True, "database_initialized": initialized, "database_available": available,
+    if misconfigured:
+        status = "misconfigured"
+    else:
+        status = "ok" if not initialized or available else "degraded"
+    return {"status": status, "prototype": True, "synthetic_data_only": True, "database_initialized": initialized, "database_available": available,
             "authentication": False, "human_review_required": True}
 
 
@@ -102,6 +303,21 @@ def health() -> dict:
 def records() -> list[Record]:
     require_database()
     return visible_records(store.list_records())
+
+
+@app.post("/api/records/ingest", status_code=201)
+def ingest_record(payload: IngestCreate, response: Response) -> dict:
+    """Ingest one plain-text document as a record.
+
+    Scope, the duplicate rule and the 200-vs-409 choice are stated in
+    ``app/ingest.py``. 201 with the new record, or 200 with the record already
+    stored for the same normalised text, department and source group.
+    """
+    require_database()
+    outcome = ingest.ingest_text(payload)
+    if not outcome.created:
+        response.status_code = 200
+    return {"id": outcome.record.id, "record": outcome.record, "created": outcome.created}
 
 
 @app.post("/api/investigations", response_model=Investigation, status_code=201)

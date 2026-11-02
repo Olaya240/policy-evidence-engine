@@ -1,0 +1,57 @@
+[
+  {
+    "mutation": "source-group normalisation (zero-width / NFC)",
+    "status": "KILLED",
+    "detail": "1 failed, 229 passed, 2 warnings in 12.63s"
+  },
+  {
+    "mutation": "two independent groups required for SUPPORTED",
+    "status": "KILLED",
+    "detail": "1 failed, 229 passed, 2 warnings in 13.40s"
+  },
+  {
+    "mutation": "proposal capacity budget",
+    "status": "KILLED",
+    "detail": "1 failed, 236 passed, 2 warnings in 12.40s"
+  },
+  {
+    "mutation": "provider request byte budget",
+    "status": "KILLED",
+    "detail": "1 failed, 228 passed, 2 warnings in 13.00s"
+  },
+  {
+    "mutation": "rate limiting at all",
+    "status": "KILLED",
+    "detail": "1 failed, 216 passed, 2 warnings in 10.60s"
+  },
+  {
+    "mutation": "restricted records excluded from reads",
+    "status": "KILLED",
+    "detail": "1 failed, 50 passed, 2 warnings in 5.09s"
+  },
+  {
+    "mutation": "negated propositional frame ('not true that')",
+    "status": "KILLED",
+    "detail": "1 failed, 255 passed, 2 warnings in 12.39s"
+  },
+  {
+    "mutation": "quantifier scoping in subject position",
+    "status": "KILLED",
+    "detail": "1 failed, 1770 passed, 2 warnings in 32.69s"
+  },
+  {
+    "mutation": "fixture citation validation",
+    "status": "KILLED",
+    "detail": "1 failed, 952 passed, 2 warnings in 23.81s"
+  },
+  {
+    "mutation": "quote grounding against the named record",
+    "status": "KILLED",
+    "detail": "1 failed, 233 passed, 2 warnings in 11.80s"
+  },
+  {
+    "mutation": "restricted records excluded from challenge",
+    "status": "KILLED",
+    "detail": "1 failed, 571 passed, 2 warnings in 15.42s"
+  }
+]

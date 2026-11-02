@@ -5,6 +5,7 @@ evidence, calculate claim status, or define evidence sufficiency.
 """
 from __future__ import annotations
 
+from .decision_table import group_key
 from .models import Evidence, EvidenceReviewState, HYPOTHESES, Stance
 
 
@@ -114,7 +115,13 @@ def evidence_coverage(hypothesis_id: str, evidence: list[Evidence]) -> dict:
     the already-selected hypothesis. Missing relation metadata is surfaced as
     unclassified evidence rather than guessed from quote text or stance.
     """
-    if type(hypothesis_id) is not str or hypothesis_id not in _KNOWN_HYPOTHESES:
+    # Membership must be checked against the table actually indexed below.
+    # Checking only `_KNOWN_HYPOTHESES` let a hypothesis declared in HYPOTHESES
+    # but missing from `_HYPOTHESIS_CATEGORIES` reach the lookup and raise
+    # KeyError -> HTTP 500 instead of the ValueError -> 422 this guard implies.
+    if (type(hypothesis_id) is not str
+            or hypothesis_id not in _KNOWN_HYPOTHESES
+            or hypothesis_id not in _HYPOTHESIS_CATEGORIES):
         raise ValueError("Unknown hypothesis")
     if type(evidence) is not list or any(not isinstance(item, Evidence) for item in evidence):
         raise TypeError("Evidence coverage requires a list of Evidence objects")
@@ -133,13 +140,29 @@ def evidence_coverage(hypothesis_id: str, evidence: list[Evidence]) -> dict:
         ]
         fresh_support = [item for item in fresh_accepted if item.semantic_relation == Stance.SUPPORTS]
         fresh_contradiction = [item for item in fresh_accepted if item.semantic_relation == Stance.CONTRADICTS]
-        source_groups = sorted({item.source_group or item.source_record_id for item in fresh_accepted})
+        source_groups = sorted({group_key(item) for item in fresh_accepted})
         if definition["role"] == "CORROBORATION":
             covered = len(source_groups) >= 2
             non_independent = bool(fresh_accepted) and not covered
         else:
             covered = bool(fresh_accepted)
             non_independent = False
+
+        # `covered_by_fresh_accepted` answers "is there fresh reviewed evidence
+        # in this aspect?" — it is direction-blind, so a category whose only
+        # fresh accepted record refutes the hypothesis is still COVERED. That
+        # meaning is preserved here because changing it is a product decision;
+        # the two flags below carry the direction that the boolean cannot.
+        covered_by_support = bool(fresh_support)
+        covered_by_contradiction = bool(fresh_contradiction)
+        if covered_by_support and covered_by_contradiction:
+            direction = "CONTESTED"
+        elif covered_by_support:
+            direction = "FOR"
+        elif covered_by_contradiction:
+            direction = "AGAINST"
+        else:
+            direction = "NONE"
 
         categories.append({
             "category_id": definition["id"],
@@ -149,6 +172,9 @@ def evidence_coverage(hypothesis_id: str, evidence: list[Evidence]) -> dict:
             "indicators": list(definition["indicators"]),
             "limitation": definition["limitation"],
             "covered_by_fresh_accepted": covered,
+            "covered_by_fresh_support": covered_by_support,
+            "covered_by_fresh_contradiction": covered_by_contradiction,
+            "direction": direction,
             "non_independent": non_independent,
             "fresh_accepted_support_ids": sorted({item.source_record_id for item in fresh_support}),
             "fresh_accepted_contradiction_ids": sorted({item.source_record_id for item in fresh_contradiction}),
@@ -159,7 +185,7 @@ def evidence_coverage(hypothesis_id: str, evidence: list[Evidence]) -> dict:
                     "review_state": item.review_state.value,
                     "stale": item.stale,
                     "disputed": item.disputed,
-                    "source_group": item.source_group or item.source_record_id,
+                    "source_group": group_key(item),
                 }
                 for item in relevant
             ],
@@ -176,7 +202,6 @@ def advisory_missing_evidence(hypothesis_id: str, evidence: list[Evidence]) -> l
     for category in coverage["categories"]:
         description = category["description"]
         matches = category["matching_evidence"]
-        fresh = [item for item in matches if item["review_state"] == "ACCEPTED" and not item["stale"] and not item["disputed"]]
         unverified = sorted({item["source_record_id"] for item in matches if item["review_state"] == "UNVERIFIED"})
         stale = sorted({item["source_record_id"] for item in matches if item["stale"]})
         disputed = sorted({item["source_record_id"] for item in matches if item["disputed"]})

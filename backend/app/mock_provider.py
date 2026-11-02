@@ -5,7 +5,7 @@ from threading import Lock
 from datetime import datetime, timezone
 
 from .models import HYPOTHESES, Record, Stance
-from .provider_safety import AssessmentContextRecord, LocalAssessmentProvider
+from .provider_safety import AssessmentContextRecord, LocalAssessmentProvider, ProviderSafetyError
 
 # Deliberately small synthetic fixture set. Provider output remains untrusted and
 # is checked again by engine.py before it can become a persisted assessment.
@@ -61,6 +61,40 @@ def assess_pair(record: Record | AssessmentContextRecord, hypothesis_id: str) ->
         pair = (Stance.NEUTRAL, "The source mentions a related term but does not establish this hypothesis.")
     stance, rationale = pair
     return {"source_record_id": record.id, "quote": record.text, "stance": stance.value, "rationale": rationale}
+
+
+_PROPOSAL_KEYS = frozenset({"source_record_id", "quote", "stance", "rationale"})
+
+
+def validate_fixture_output(output, records):
+    """Refuse a configured fixture that cites evidence this call did not supply.
+
+    A fixture is provider output, so it is held to the provenance rule the
+    provider itself must obey: every ``source_record_id`` must be one of the
+    records handed to *this* call, and every ``quote`` must appear in that
+    record's own text. A fixture naming any other record is fabricated evidence
+    even before the engine sees it, so it is refused here rather than echoed.
+
+    Shape and provenance only; stance/rationale domain validity stays with the
+    engine's boundary, which sees the same proposal list afterwards.
+    """
+    texts = {}
+    for record in records:
+        record_id, text = getattr(record, "id", None), getattr(record, "text", None)
+        if type(record_id) is str and type(text) is str:
+            texts[record_id] = text
+    if type(output) is not list:
+        raise ProviderSafetyError("malformed_output")
+    for item in output:
+        if type(item) is not dict or set(item) != _PROPOSAL_KEYS:
+            raise ProviderSafetyError("malformed_output")
+        source_id = item["source_record_id"]
+        if type(source_id) is not str or source_id not in texts:
+            raise ProviderSafetyError("invalid_source")
+        quote = item["quote"]
+        if type(quote) is not str or len(quote.strip()) < 3 or quote not in texts[source_id]:
+            raise ProviderSafetyError("invalid_quote")
+    return output
 
 
 class MockProvider(LocalAssessmentProvider):
@@ -159,7 +193,9 @@ class MockProvider(LocalAssessmentProvider):
             raise ValueError("Unknown hypothesis")
         has_fixture, fixture_output = self._fixture_output(hypothesis_id)
         if has_fixture:
-            return fixture_output
+            # Fixtures (overrides and sequences) are held to the same provenance
+            # rule as generated output: cite only records this call was given.
+            return validate_fixture_output(fixture_output, records)
         result = []
         for record in records:
             if record.restricted:

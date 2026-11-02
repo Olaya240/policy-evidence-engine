@@ -5,8 +5,10 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
+from .dependency_graph import transitive_dependents
 from .models import Record
 from .mock_provider import SEED_RECORDS
 
@@ -53,8 +55,16 @@ def database_path() -> Path:
 @contextmanager
 def connect(*, write: bool = False):
     connection = None
+    # Path validation raises ValueError, and it happens before anything is opened.
+    # Its exception handler must therefore sit here and not around the body: when
+    # it wrapped the body, every ValueError a caller raised (a revision mismatch,
+    # a recomputed claim set that does not match) was relabelled "database
+    # unavailable", turning a 422 into a 503 and hiding the real cause.
     try:
         path = database_path()
+    except (OSError, ValueError) as exc:
+        raise DatabaseUnavailable("Prototype database is unavailable") from exc
+    try:
         if not path.is_file():
             raise DatabaseUnavailable("Prototype database is not initialized")
         connection = sqlite3.connect(path, timeout=5)
@@ -65,10 +75,10 @@ def connect(*, write: bool = False):
         yield connection
         if write:
             connection.commit()
-    except (OSError, ValueError) as exc:
+    except DatabaseUnavailable:
         _rollback_quietly(connection, write)
-        raise DatabaseUnavailable("Prototype database is unavailable") from exc
-    except sqlite3.Error as exc:
+        raise
+    except (OSError, sqlite3.Error) as exc:
         _rollback_quietly(connection, write)
         raise DatabaseUnavailable("Prototype database is unavailable") from exc
     except Exception:
@@ -145,9 +155,76 @@ def get_record(record_id: str) -> Record | None:
     return Record(id=row["id"], timestamp=row["timestamp"], department=row["department"], text=row["text"], tags=json.loads(row["tags_json"]), restricted=False, source_group=row["source_group"])
 
 
-def create_investigation(question: str, claims: list[dict]) -> dict:
+def _wall_clock() -> datetime:
+    """Default write clock: the real UTC instant.
+
+    Every row this module writes is stamped with an instant, and an evaluation
+    run has to write its own frozen instant rather than the moment the row
+    happened to be created. The clock is therefore a keyword-only argument with
+    this wall clock as its default, so every existing caller keeps the previous
+    behaviour unchanged.
+    """
+    return datetime.now(timezone.utc)
+
+
+def _stamp(clock: Callable[[], datetime] | None) -> str:
+    return (clock if clock is not None else _wall_clock)().isoformat()
+
+
+def _record_from_row(row: sqlite3.Row) -> Record:
+    return Record(id=row["id"], timestamp=row["timestamp"], department=row["department"],
+                  text=row["text"], tags=json.loads(row["tags_json"]),
+                  restricted=bool(row["restricted"]), source_group=row["source_group"])
+
+
+def create_record(
+    *,
+    text: str,
+    department: str,
+    tags: list[str],
+    source_group: str | None = None,
+    timestamp: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> tuple[Record, bool]:
+    """Insert one non-restricted record, or return the identical one already stored.
+
+    Identity is exact: the stored text (the caller normalises spacing before this
+    call), the department and the source group. Lookup and insert share one
+    ``BEGIN IMMEDIATE`` transaction, so two ingests arriving together cannot both
+    insert and produce a silent duplicate.
+
+    Restricted rows are never matched. They are not readable by the caller, so
+    reusing one would leak its id and hand back a record the caller cannot
+    fetch; the same content ingested as plain text becomes a new row.
+
+    ``timestamp`` is the client's value when supplied; otherwise the row is
+    stamped by ``clock`` through the same ``_stamp`` seam every other write in
+    this module uses. Returns ``(record, created)``.
+    """
+    with connect(write=True) as db:
+        row = db.execute(
+            "SELECT * FROM records WHERE restricted=0 AND department=? AND text=? "
+            "AND COALESCE(source_group,'')=? ORDER BY timestamp, id LIMIT 1",
+            (department, text, source_group or ""),
+        ).fetchone()
+        if row is not None:
+            return _record_from_row(row), False
+        record_id = str(uuid4())
+        stamp = timestamp.isoformat() if timestamp is not None else _stamp(clock)
+        db.execute(
+            "INSERT INTO records(id,timestamp,department,text,tags_json,restricted,source_group) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (record_id, stamp, department, text, json.dumps(tags), 0, source_group),
+        )
+    return Record(id=record_id, timestamp=stamp, department=department, text=text,
+                  tags=list(tags), restricted=False, source_group=source_group), True
+
+
+def create_investigation(
+    question: str, claims: list[dict], *, clock: Callable[[], datetime] | None = None
+) -> dict:
     investigation_id = str(uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = _stamp(clock)
     with connect(write=True) as db:
         db.execute("INSERT INTO investigations VALUES(?,?,?,1)", (investigation_id, question, now))
         for claim in claims:
@@ -193,7 +270,11 @@ def get_challenge_snapshot(investigation_id: str, claim_id: str, record_id: str)
         current = _latest_claims(db, investigation_id)
     if claim_id not in current:
         return None
-    affected = {claim_id} | {cid for cid, claim in current.items() if record_id in claim["dependencies"]}
+    # One notion of "affected": the transitively dependent claims come from
+    # `dependency_graph`, and the challenged claim itself is always included. Keeping
+    # the comprehension here would be a second definition that could drift from the
+    # module the evaluator checks against.
+    affected = {claim_id} | set(transitive_dependents(current, record_id))
     claims = {cid: current[cid] for cid in sorted(affected)}
     return {"revision": inv["version"], "claims": claims, "affected_claim_ids": sorted(affected)}
 
@@ -208,6 +289,7 @@ def apply_challenge(
     expected_revision: int,
     expected_claims: dict[str, dict],
     revised_claims: dict[str, dict],
+    clock: Callable[[], datetime] | None = None,
 ) -> dict | None:
     """Persist precomputed affected claims iff the captured snapshot is still current."""
     with connect(write=True) as db:
@@ -228,7 +310,7 @@ def apply_challenge(
         if set(revised_claims) != affected:
             raise ValueError("Recomputed claim set does not match affected dependencies")
         before = {cid: current[cid] for cid in sorted(affected)}
-        now = datetime.now(timezone.utc).isoformat()
+        now = _stamp(clock)
         next_version = inv["version"] + 1
         after = {}
         for cid in sorted(affected):

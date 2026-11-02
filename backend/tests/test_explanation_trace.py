@@ -45,30 +45,31 @@ def _claim(items):
     [
         ([{"id": "S", "quote": "support", "stance": "SUPPORTS"},
           {"id": "C", "quote": "contradiction", "stance": "CONTRADICTS"}],
-         Status.PARTIAL, .52, "STATUS.FRESH_SUPPORT_AND_CONTRADICTION", "CONFIDENCE.FIXED_0_52"),
+         Status.PARTIAL, 0.0, "STATUS.V2_DIRECTIONAL_EVIDENCE_BALANCED", "CONFIDENCE.V2_SIGNED_MARGIN"),
         ([{"id": "A", "quote": "fresh support", "stance": "SUPPORTS"},
           {"id": "B", "quote": "stale support", "stance": "SUPPORTS", "days_old": 120}],
-         Status.PARTIAL, .54, "STATUS.FRESH_WITH_STALE_CONTEXT", "CONFIDENCE.FIXED_0_54"),
+         # The stale record is context: this is the single-fresh-support shape.
+         Status.PARTIAL, 0.5, "STATUS.V2_DIRECTIONAL_EVIDENCE_BALANCED", "CONFIDENCE.V2_SIGNED_MARGIN"),
         ([{"id": "A", "quote": "first support", "stance": "SUPPORTS", "department": "Front Office"},
           {"id": "B", "quote": "second support", "stance": "SUPPORTS", "department": "Housekeeping"}],
-         Status.SUPPORTED, .78, "STATUS.MULTI_GROUP_FRESH_SUPPORT", "CONFIDENCE.FIXED_0_78_DIVERSE_DEPARTMENTS"),
+         Status.SUPPORTED, pytest.approx(2 / 3), "STATUS.V2_SUPPORT_OUTWEIGHS_CONTRADICTION", "CONFIDENCE.V2_SIGNED_MARGIN"),
         ([{"id": "A", "quote": "first support", "stance": "SUPPORTS", "department": "Front Office"},
           {"id": "B", "quote": "second support", "stance": "SUPPORTS", "department": "Front Office"}],
-         Status.SUPPORTED, .68, "STATUS.MULTI_GROUP_FRESH_SUPPORT", "CONFIDENCE.FIXED_0_68_SAME_OR_MISSING_DEPARTMENT"),
+         Status.SUPPORTED, pytest.approx(2 / 3), "STATUS.V2_SUPPORT_OUTWEIGHS_CONTRADICTION", "CONFIDENCE.V2_SIGNED_MARGIN"),
         ([{"id": "A", "quote": "support", "stance": "SUPPORTS"}],
-         Status.PARTIAL, .55, "STATUS.SINGLE_GROUP_FRESH_SUPPORT", "CONFIDENCE.FIXED_0_55"),
+         Status.PARTIAL, 0.5, "STATUS.V2_DIRECTIONAL_EVIDENCE_BALANCED", "CONFIDENCE.V2_SIGNED_MARGIN"),
         ([{"id": "A", "quote": "contradiction", "stance": "CONTRADICTS"}],
-         Status.CONTRADICTED, .58, "STATUS.FRESH_CONTRADICTION_ONLY", "CONFIDENCE.FIXED_0_58_SINGLE_CONTRADICTION"),
+         Status.CONTRADICTED, 0.5, "STATUS.V2_CONTRADICTION_OUTWEIGHS_SUPPORT", "CONFIDENCE.V2_SIGNED_MARGIN"),
         ([{"id": "A", "quote": "first contradiction", "stance": "CONTRADICTS"},
           {"id": "B", "quote": "second contradiction", "stance": "CONTRADICTS"}],
-         Status.CONTRADICTED, .68, "STATUS.FRESH_CONTRADICTION_ONLY", "CONFIDENCE.FIXED_0_68_MULTIPLE_CONTRADICTIONS"),
+         Status.CONTRADICTED, pytest.approx(2 / 3), "STATUS.V2_CONTRADICTION_OUTWEIGHS_SUPPORT", "CONFIDENCE.V2_SIGNED_MARGIN"),
         ([{"id": "A", "quote": "stale support", "stance": "SUPPORTS", "days_old": 120}],
-         Status.INSUFFICIENT, .25, "STATUS.STALE_ONLY", "CONFIDENCE.FIXED_0_25"),
-        ([], Status.INSUFFICIENT, .20, "STATUS.INSUFFICIENT_NO_DIRECTIONAL_EVIDENCE",
-         "CONFIDENCE.FIXED_0_20_NO_ACCEPTED_FRESH_EVIDENCE"),
+         Status.INSUFFICIENT, 0.0, "STATUS.V2_NO_DIRECTIONAL_EVIDENCE", "CONFIDENCE.V2_ZERO_MARGIN"),
+        ([], Status.INSUFFICIENT, 0.0, "STATUS.V2_NO_DIRECTIONAL_EVIDENCE",
+         "CONFIDENCE.V2_ZERO_MARGIN"),
         ([{"id": "A", "quote": "neutral", "stance": "NEUTRAL"}],
-         Status.INSUFFICIENT, .30, "STATUS.INSUFFICIENT_NO_DIRECTIONAL_EVIDENCE",
-         "CONFIDENCE.FIXED_0_30_ACCEPTED_NON_DIRECTIONAL_EVIDENCE"),
+         Status.INSUFFICIENT, 0.0, "STATUS.V2_NO_DIRECTIONAL_EVIDENCE",
+         "CONFIDENCE.V2_ZERO_MARGIN"),
     ],
     ids=["mixed", "fresh-and-stale", "diverse-support", "same-department-support",
          "single-support", "single-contradiction", "multiple-contradictions", "stale-only",
@@ -81,9 +82,9 @@ def test_trace_rule_ids_match_existing_status_branches(items, status, confidence
     assert claim["confidence"] == confidence
     assert trace["status_rule_id"] == status_rule
     assert trace["confidence_rule_id"] == confidence_rule
-    assert trace["reasoning_rule_version"] == "story-connect-status-v1"
+    assert trace["reasoning_rule_version"] == "story-connect-status-v2"
     assert trace["semantic_guard"]["rule_set_version"] == "phrase-guard-v1"
-    assert trace["confidence_kind"] == "FIXED_ENGINE_HEURISTIC_NOT_CALIBRATED_PROBABILITY"
+    assert trace["confidence_kind"] == "SIGNED_EVIDENCE_MARGIN_NOT_CALIBRATED_PROBABILITY"
 
 
 def test_disputed_branch_has_stable_rule_id_and_original_stale_acceptance_behavior():
@@ -95,11 +96,14 @@ def test_disputed_branch_has_stable_rule_id_and_original_stale_acceptance_behavi
     engine = AssessmentEngine(provider, semantic_guard=False)
     before = engine.assess_hypothesis([source], "CHECKLIST_UNAVAILABLE")
     challenged = engine.challenge(before, [source], source.id, "support")
-    assert before["confidence"] == .55
+    assert before["confidence"] == .5
     assert challenged["status"] == Status.PARTIAL.value
-    assert challenged["confidence"] == .48
-    assert challenged["explanation_trace"]["status_rule_id"] == "STATUS.ACCEPTED_DISPUTED_EVIDENCE"
-    assert challenged["explanation_trace"]["confidence_rule_id"] == "CONFIDENCE.FIXED_0_48"
+    # The verdict is withheld, so the number describes the challenged
+    # configuration: one source for, under review, is PARTIAL 0.5.
+    assert challenged["confidence"] == .5
+    assert challenged["explanation_trace"]["evidence_direction"] == "FOR"
+    assert challenged["explanation_trace"]["status_rule_id"] == "STATUS.V2_DISPUTED_EVIDENCE_DECISION_RELEVANT"
+    assert challenged["explanation_trace"]["confidence_rule_id"] == "CONFIDENCE.V2_ZERO_MARGIN"
 
 
 def test_evidence_dispositions_cover_direction_neutral_unverified_stale_disputed_and_dependent():
@@ -212,7 +216,7 @@ def test_advisory_coverage_is_separate_from_status_and_confidence():
     assert [category["category_id"] for category in trace["advisory_coverage"]["categories"]] == [
         "checklist_access_context", "independent_checklist_support",
     ]
-    assert claim["status"] == Status.PARTIAL.value and claim["confidence"] == .55
+    assert claim["status"] == Status.PARTIAL.value and claim["confidence"] == .5
     assert (claim["status"], claim["confidence"], claim["uncertainty"], claim["conflicts"]) == (
         expected[0].value, expected[1], expected[2], expected[3],
     )

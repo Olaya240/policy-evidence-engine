@@ -15,6 +15,15 @@ MAX_REQUEST_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 4 * 1024
 MAX_RESPONSE_READ_CHUNK_BYTES = 1024
 MAX_CONTENT_LENGTH_HEADER_CHARS = 10
+# Upper bound on proposals accepted from one response. Each becomes claim
+# evidence, so an unbounded array is amplification even when every item is valid.
+# Measured: a 4 KiB body holds at most 43 minimum-size proposals (92 bytes each in
+# the serialized content), so 43 is the real ceiling and any larger count can never
+# fire. A *smaller* count (32 was tried) does bind first, but it rejects legitimate
+# 33-43-record corpora for a bound the byte cap already imposes, and the engine
+# assesses every record in one call — so the cap sits at the measured ceiling and
+# the byte cap is what actually bounds work.
+MAX_PROPOSALS = 43
 MAX_EXPERIMENT_REQUESTS = 17
 MAX_CONFIGURABLE_ESTIMATED_BUDGET_USD = Decimal("5.00")
 # Process-local and shared by every supported bounded call. Fail fast rather
@@ -33,7 +42,21 @@ _SERIALIZATION_SEAL = object()
 
 
 class SerializedProviderRequest(bytes):
-    """Immutable exact payload created only by the allowlist serializer."""
+    """Immutable exact payload produced by the allowlist serializer.
+
+    This is in-process defense in depth, not an isolation boundary. Two bypasses
+    exist by construction and are deliberately documented rather than denied:
+
+    * ``_SERIALIZATION_SEAL`` is a module global, so any code that can import
+      this module can call the constructor with the real seal.
+    * ``bytes.__new__(SerializedProviderRequest, b"...")`` skips ``__new__``
+      entirely, and ``object.__setattr__`` can then copy a genuine request's
+      ``_seal`` onto the result.
+
+    What it does guarantee: no caller reaches a provider by accident, and no
+    code can mutate a request after serialization. What it does not: isolation
+    from hostile in-process code, which needs a process boundary, not a type.
+    """
 
     def __new__(cls, payload: bytes, *, _seal: object = None):
         if _seal is not _SERIALIZATION_SEAL:
@@ -44,6 +67,21 @@ class SerializedProviderRequest(bytes):
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("serialized provider requests are immutable")
+
+    def __copy__(self) -> "SerializedProviderRequest":
+        # The payload is immutable and already sealed, so a distinct copy could
+        # only be a forgery: `copy` reconstructs through `bytes.__new__`, which
+        # skips this class's `__new__` and the seal with it. Copying by identity
+        # is the only answer that preserves the guarantee.
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "SerializedProviderRequest":
+        return self
+
+    def __reduce__(self):
+        # Unpickling rebuilds the object without the seal, so the protocol is
+        # refused outright rather than silently producing an untrusted value.
+        raise TypeError("serialized provider requests cannot be pickled")
 
 
 def _is_serialized_request(value: object) -> bool:
@@ -59,6 +97,14 @@ class AssessmentContextRecord:
 
     @property
     def restricted(self) -> bool:
+        """Compatibility shim, not a fact about the record.
+
+        Always ``False`` because only records that already passed
+        ``eligible_provider_records`` are projected here, so a restricted record
+        can never become one of these. Constructing this class directly from an
+        unvetted :class:`Record` would make the property lie, which is why this
+        projection is built in exactly one place.
+        """
         return False
 
 
@@ -76,6 +122,16 @@ _SENSITIVE_TEXT_PATTERNS = (
     re.compile(r"(?<!\w)(?:\+?\d[\d(). -]{8,}\d)(?!\w)"),
     re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     re.compile(r"(?i)\b(?:api[_ -]?key|access[_ -]?token|password|secret)\s*[:=]\s*\S+"),
+    # Credentials that appear without a keyword are the ones the keyword rule
+    # above misses: a pasted bearer header, a JWT, or a vendor key prefix.
+    # Each pattern requires a long random-looking tail so that ordinary words
+    # containing "sk-" or short hex are not excluded from evidence.
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}=*"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9]{16,}"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
 
 
@@ -84,18 +140,47 @@ def contains_sensitive_text(text: str) -> bool:
     return any(pattern.search(text) for pattern in _SENSITIVE_TEXT_PATTERNS)
 
 
-def eligible_provider_records(records: Sequence[Record]) -> list[Record]:
-    """Return only records safe for the current deterministic context policy."""
+def partition_provider_records(
+    records: list[Record] | tuple[Record, ...],
+) -> tuple[list[Record], list[tuple[str, str]]]:
+    """Split records into eligible ones and ``(record_id, reason)`` exclusions.
+
+    ``eligible_provider_records`` returns only the first half, which makes a
+    fully filtered corpus indistinguishable from an empty one: a caller cannot
+    tell "nothing was sent" from "everything was withheld", and an operator
+    reading a budget report cannot tell why. This function exists so the reason
+    survives the decision without changing the shape every existing caller uses.
+
+    Reasons are a closed set: ``restricted`` and ``sensitive_text``.
+    """
     if not isinstance(records, (list, tuple)):
         raise ProviderSafetyError("invalid_context")
-    eligible = []
+    eligible: list[Record] = []
+    excluded: list[tuple[str, str]] = []
     for record in records:
         if not isinstance(record, Record):
             raise ProviderSafetyError("invalid_context")
-        if (not record.restricted and not contains_sensitive_text(record.id)
-                and not contains_sensitive_text(record.text)):
-            eligible.append(record)
-    return eligible
+        if record.restricted:
+            excluded.append((record.id, "restricted"))
+            continue
+        if contains_sensitive_text(record.id) or contains_sensitive_text(record.text):
+            excluded.append((record.id, "sensitive_text"))
+            continue
+        eligible.append(record)
+    return eligible, excluded
+
+
+def eligible_provider_records(records: list[Record] | tuple[Record, ...]) -> list[Record]:
+    """Return only records safe for the current deterministic context policy.
+
+    The annotation matches the runtime check: a list or tuple is accepted and
+    every other sequence (including ``str``, which is a ``Sequence``) is
+    rejected, so an accidental string of records cannot be treated as context.
+
+    Use :func:`partition_provider_records` when the *reason* a record was
+    withheld matters; this function answers only "what may be sent".
+    """
+    return partition_provider_records(records)[0]
 
 
 class ProviderSafetyError(RuntimeError):
@@ -203,9 +288,24 @@ def serialize_provider_request(records: Sequence[Record], hypothesis_id: str) ->
         parts.extend((b'{"id":', _encode_json_string(record_id), b',"text":', _encode_json_string(text), b"}"))
     parts.append(suffix)
     payload = b"".join(parts)
-    if len(payload) != predicted_size or len(payload) > MAX_REQUEST_BYTES:
+    if len(payload) != predicted_size:
+        # The encoder and the size model disagree. That is an internal accounting
+        # fault, and reporting it as `request_too_large` hid a whole bug class
+        # behind a message that reads like a client mistake.
+        raise ProviderSafetyError("serialization_accounting_mismatch")
+    if len(payload) > MAX_REQUEST_BYTES:
         raise ProviderSafetyError("request_too_large")
     return SerializedProviderRequest(payload, _seal=_SERIALIZATION_SEAL)
+
+
+async def _close_quietly(response: object) -> None:
+    """Best-effort close: a close failure must not replace the verdict."""
+    close = getattr(response, "aclose", None)
+    if callable(close):
+        try:
+            await close()
+        except Exception:  # noqa: BLE001 - see docstring
+            pass
 
 
 async def _read_bounded_response(response: StreamingResponse) -> bytes:
@@ -227,7 +327,14 @@ async def _read_bounded_response(response: StreamingResponse) -> bytes:
             # oversized body without buffering another full chunk.
             requested = min(MAX_RESPONSE_READ_CHUNK_BYTES, MAX_RESPONSE_BYTES - len(body) + 1)
             chunk = await response.read_chunk(requested)
-            if not isinstance(chunk, bytes) or len(chunk) > requested:
+            if not isinstance(chunk, bytes):
+                # A transport that hands back a non-bytes chunk is broken, not
+                # oversized. Reporting it as `response_too_large` made an
+                # internal fault look like a client-visible size verdict.
+                raise ProviderSafetyError("malformed_response_body")
+            if len(chunk) > requested:
+                # Over-delivery past the requested window is a transport
+                # contract breach; trimming it would silently truncate a body.
                 raise ProviderSafetyError("response_too_large")
             if not chunk:
                 if declared_size is not None and len(body) != declared_size:
@@ -237,9 +344,7 @@ async def _read_bounded_response(response: StreamingResponse) -> bytes:
                 raise ProviderSafetyError("response_too_large")
             body.extend(chunk)
     finally:
-        close = getattr(response, "aclose", None)
-        if callable(close):
-            await close()
+        await _close_quietly(response)
 
 
 @dataclass(frozen=True)
@@ -265,7 +370,13 @@ def _positive_decimal(value: Decimal | str | None) -> Decimal:
 
 
 class ProviderCallGate:
-    """Disabled by default; reserve each attempt so retries consume quota too."""
+    """Fail-closed by default and counting attempts, not successes.
+
+    A gate constructed without an enabled `ProviderBudgetConfig` refuses every
+    call (`provider_disabled`) — it is a kill switch, not an unlimited budget.
+    Each permitted attempt is reserved before dispatch and never refunded, so a
+    retry consumes quota and `request_count` counts attempts.
+    """
 
     __slots__ = ("_config", "_enabled", "_max_requests", "_ceiling", "_per_request",
                  "_request_count", "_reserved_estimated_cost", "_lock", "_sealed")
@@ -335,6 +446,10 @@ class ProviderCallGate:
             if self._request_count >= self._max_requests:
                 raise ProviderSafetyError("request_limit")
             projected = self._reserved_estimated_cost + self._per_request
+            # Unreachable for the configurations `_validate_enabled_config`
+            # accepts: it already requires per_request * max_requests <= ceiling
+            # and every reservation adds exactly per_request. Kept as the only
+            # guard that would hold if the estimate ever becomes non-uniform.
             if projected > self._ceiling:
                 raise ProviderSafetyError("budget_exceeded")
             # Reserve before sending. Failures and retries do not refund quota.
@@ -508,15 +623,8 @@ class BoundedTransportProvider:
             valid_timeout = False
         if not valid_timeout:
             raise ProviderSafetyError("invalid_timeout")
-        try:
-            valid_timeout = (not isinstance(timeout_seconds, bool)
-                             and isinstance(timeout_seconds, (int, float))
-                             and math.isfinite(timeout_seconds)
-                             and 0 < timeout_seconds <= MAX_REQUEST_TIMEOUT_SECONDS)
-        except (OverflowError, TypeError, ValueError):
-            valid_timeout = False
-        if not valid_timeout:
-            raise ProviderSafetyError("invalid_timeout")
+        # One validation, one copy: the block used to appear twice, which made the
+        # second copy unfalsifiable and hid which one was authoritative.
         if not _TRANSPORT_SINGLE_FLIGHT.acquire(blocking=False):
             raise ProviderSafetyError("concurrent_request")
         try:
@@ -524,7 +632,14 @@ class BoundedTransportProvider:
 
             async def exchange() -> bytes:
                 response = await self._transport.send(bytes(request), timeout_seconds=float(timeout_seconds))
-                return await _read_bounded_response(response)
+                try:
+                    return await _read_bounded_response(response)
+                finally:
+                    # Cancellation can land between `send` returning and the bounded
+                    # read starting, which left the response open with nobody to
+                    # close it. `aclose` is idempotent for httpx responses, so the
+                    # double close from `_read_bounded_response` is harmless.
+                    await _close_quietly(response)
 
             try:
                 body = await asyncio.wait_for(exchange(), timeout=float(timeout_seconds))
@@ -658,7 +773,7 @@ class BasetenMuseSparkOpenAdapter:
             BasetenMuseSparkOpenAdapter._reject_surrogate_text(result)
         except ProviderSafetyError:
             raise
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, RecursionError):
             raise ProviderSafetyError("malformed_response") from None
 
         allowed_top = {"id", "object", "created", "model", "choices", "usage"}
@@ -667,6 +782,10 @@ class BasetenMuseSparkOpenAdapter:
             raise ProviderSafetyError("unsupported_response")
         if type(result["model"]) is not str or not result["model"]:
             raise ProviderSafetyError("malformed_response")
+        if result["model"] != BasetenMuseSparkOpenAdapter.MODEL_SLUG:
+            # The request pins the model; a response echoing a different one came
+            # from a model nobody approved, so the pin has to be two-way.
+            raise ProviderSafetyError("unsupported_response")
         if "id" in result and type(result["id"]) is not str:
             raise ProviderSafetyError("malformed_response")
         if "object" in result and result["object"] != "chat.completion":
@@ -766,7 +885,12 @@ class BasetenMuseSparkOpenAdapter:
                     wire_body, self, boundary, timeout_seconds=timeout_seconds,
                     _authorization=authorization,
                 )
-                return await _read_bounded_response(response)
+                try:
+                    return await _read_bounded_response(response)
+                finally:
+                    # Same leak as the BoundedTransportProvider path: cancellation
+                    # between send and read dropped the response unclosed.
+                    await _close_quietly(response)
 
             try:
                 body = await asyncio.wait_for(exchange(), timeout=timeout_seconds)
@@ -784,7 +908,9 @@ class BasetenMuseSparkOpenAdapter:
 async def bounded_provider_call(provider: BoundedTransportProvider, request: SerializedProviderRequest) -> Any:
     """Legacy public helper fails closed; production dispatch requires the boundary."""
     if type(provider) is not BoundedTransportProvider:
-        raise ProviderSafetyError("unsupported_transport")
+        # Was `unsupported_transport`, which named a transport fault for a bad
+        # provider — the same code-reuse defect this audit fixed twice already.
+        raise ProviderSafetyError("unsupported_provider")
     raise ProviderSafetyError("mandatory_boundary_required")
 
 
@@ -819,7 +945,9 @@ def parse_provider_proposals(body: bytes, request: SerializedProviderRequest) ->
         )
     except ProviderSafetyError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        # `json.loads` recurses, so a deeply nested body raises RecursionError.
+        # Without this it escaped as an unclassified 500 on an untrusted body.
         raise ProviderSafetyError("malformed_response") from None
     _validate_provider_proposals(result, request)
     return result
@@ -834,6 +962,15 @@ def _validate_provider_proposals(proposals: Any, request: SerializedProviderRequ
         raise ProviderSafetyError("invalid_request") from None
     if type(proposals) is not list:
         raise ProviderSafetyError("malformed_output")
+    if len(proposals) > MAX_PROPOSALS:
+        # Each proposal becomes claim evidence downstream, so an unbounded array
+        # is an amplification path even though every item is individually valid.
+        # Its own code: this is a capacity limit on a well-shaped response, not a
+        # schema breach, and an operator needs to tell "corpus too large" from
+        # "vendor sent garbage". Raising `malformed_output` here contradicted this
+        # comment: the client was told the provider sent garbage when the corpus was
+        # simply over the budget.
+        raise ProviderSafetyError("proposal_capacity_exceeded")
     required = {"source_record_id", "quote", "stance", "rationale"}
     for item in proposals:
         if type(item) is not dict or set(item) != required:

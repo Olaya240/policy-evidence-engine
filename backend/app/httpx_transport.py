@@ -15,7 +15,9 @@ ASSESSMENT_PATH = "/v1/assess"
 # Reserved placeholder origin. A future reviewed integration must change this
 # trusted constant in a separate phase; callers cannot approve their own host.
 APPROVED_PROVIDER_ORIGIN = "https://provider.invalid"
-BASETEN_CHAT_COMPLETIONS_ENDPOINT = "https://inference.baseten.co/v1/chat/completions"
+BASETEN_CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+BASETEN_APPROVED_ORIGIN = "https://inference.baseten.co"
+BASETEN_CHAT_COMPLETIONS_ENDPOINT = BASETEN_APPROVED_ORIGIN + BASETEN_CHAT_COMPLETIONS_PATH
 _REQUEST_HEADERS = {
     "accept": "application/json",
     "accept-encoding": "identity",
@@ -35,6 +37,16 @@ def _is_approved_origin(origin: str, _pinned_origin: str = APPROVED_PROVIDER_ORI
     return origin == _pinned_origin
 
 
+def _is_approved_baseten_origin(origin: str, _pinned_origin: str = BASETEN_APPROVED_ORIGIN) -> bool:
+    """Baseten counterpart of `_is_approved_origin`, pinned the same way.
+
+    The two endpoints have different approved origins, so one captured default
+    cannot serve both; each is compared against the constant that was defined
+    beside its path.
+    """
+    return origin == _pinned_origin
+
+
 class _DropTransportTrace(logging.Filter):
     """Drop HTTPX/httpcore records that may include endpoint or header data."""
 
@@ -43,16 +55,27 @@ class _DropTransportTrace(logging.Filter):
 
 
 _DROP_TRANSPORT_TRACE = _DropTransportTrace()
-# HTTPX uses the root `httpx` logger; HTTPcore emits from subloggers whose
-# records do not pass through the parent logger's filters when propagated.
-for _logger_name in (
-    "httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2",
-    "httpcore.proxy", "httpcore.socks",
-):
-    logging.getLogger(_logger_name).addFilter(_DROP_TRANSPORT_TRACE)
+# A logger filter only sees records emitted on that exact logger: a record
+# created on httpcore.connection is filtered by httpcore.connection, never by an
+# ancestor's filters. Attaching the filter to each httpcore sublogger therefore
+# leaves every propagated record free to reach the root handlers, where the
+# authorization header can be written out. Propagation is stopped at the parent
+# loggers instead, and a NullHandler absorbs the records, so no handler anywhere
+# in the process receives them. The filter is kept on each logger as a second
+# barrier in case a handler is later attached directly to httpx or httpcore.
+for _logger_name in ("httpx", "httpcore"):
+    _transport_logger = logging.getLogger(_logger_name)
+    _transport_logger.addFilter(_DROP_TRANSPORT_TRACE)
+    _transport_logger.addHandler(logging.NullHandler())
+    _transport_logger.propagate = False
 
 
-def _parse_endpoint(value: str) -> tuple[httpx.URL, str]:
+def _parse_endpoint(value: str, path: str = ASSESSMENT_PATH) -> tuple[httpx.URL, str]:
+    """Parse and canonicalise an endpoint, pinning it to one exact path.
+
+    `path` is a parameter so the Baseten chat path is validated by the same
+    rules as the assessment path rather than bypassing them.
+    """
     if not isinstance(value, str) or not value or any(ord(ch) < 0x21 or ord(ch) > 0x7e for ch in value):
         raise ProviderSafetyError("invalid_transport")
     try:
@@ -61,8 +84,8 @@ def _parse_endpoint(value: str) -> tuple[httpx.URL, str]:
         raise ProviderSafetyError("invalid_transport") from None
     if (str(url) != value or "?" in value or "#" in value or b"@" in url.netloc
             or url.scheme != "https" or not url.host or url.username or url.password
-            or url.query or url.fragment or url.path != ASSESSMENT_PATH
-            or url.raw_path != ASSESSMENT_PATH.encode("ascii")):
+            or url.query or url.fragment or url.path != path
+            or url.raw_path != path.encode("ascii")):
         raise ProviderSafetyError("invalid_transport")
     origin = f"https://{url.netloc.decode('ascii')}"
     return url, origin
@@ -220,14 +243,22 @@ class BasetenMuseSparkOpenTransport:
     associated provider call gate is disabled unless separately supplied.
     """
 
-    __slots__ = ("_api_key", "_adapter", "_boundary", "_sealed")
+    __slots__ = ("_api_key", "_adapter", "_boundary", "_endpoint", "_sealed")
 
     def __init__(self, api_key: str):
         if type(api_key) is not str or not api_key or api_key.strip() != api_key:
             raise ProviderSafetyError("invalid_transport")
+        # The chat endpoint is now admitted through the same validator as the
+        # assessment endpoint, with its own pinned path and origin. Before this,
+        # the reviewed pinning helper could not validate /v1/chat/completions and
+        # the live Baseten path posted a module literal that nothing checked.
+        url, origin = _parse_endpoint(BASETEN_CHAT_COMPLETIONS_ENDPOINT, BASETEN_CHAT_COMPLETIONS_PATH)
+        if not _is_approved_baseten_origin(origin):
+            raise ProviderSafetyError("invalid_transport")
         object.__setattr__(self, "_api_key", api_key)
         object.__setattr__(self, "_adapter", None)
         object.__setattr__(self, "_boundary", None)
+        object.__setattr__(self, "_endpoint", str(url))
         object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -305,7 +336,7 @@ class BasetenMuseSparkOpenTransport:
                 timeout=httpx.Timeout(timeout_seconds),
             )
             request = client.build_request(
-                "POST", BASETEN_CHAT_COMPLETIONS_ENDPOINT, content=payload,
+                "POST", self._endpoint, content=payload,
                 headers=headers, timeout=httpx.Timeout(timeout_seconds),
             )
             response = await client.send(request, stream=True, follow_redirects=False)
