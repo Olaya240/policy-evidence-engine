@@ -39,8 +39,9 @@ def db(monkeypatch):
     return path
 
 
-# 1. A claim row whose JSON is truncated must surface as a bounded error, never a
-#    traceback or a partially populated claim.
+# 1. A claim row whose JSON is truncated must surface as a bounded error that names
+#    the row, never a traceback or a partially populated claim — and it must not
+#    make a healthy investigation created afterwards unreadable.
 @pytest.mark.parametrize("corrupt", ['{"id": "x", ', "not json at all", "[]", ""])
 def test_a_corrupt_claim_row_does_not_produce_a_stack_trace(db, corrupt):
     created = call("POST", "/api/investigations", json_body={"question": QUESTION}).json()
@@ -59,14 +60,33 @@ def test_a_corrupt_claim_row_does_not_produce_a_stack_trace(db, corrupt):
 
     response = call("GET", f"/api/investigations/{investigation_id}")
 
-    assert response.status_code in {500, 503}, response.status_code
+    # 503, not 500: the failure is a known unreadable row, reported as an outage of
+    # the local store, with one fixed sentence and nothing of the stored text.
+    assert response.status_code == 503, response.status_code
     body = response.text
     assert "Traceback" not in body
     assert "claim_versions" not in body
     assert "sqlite3" not in body.lower()
 
+    # The client body cannot name the row, so the error must: table, row id, column.
+    with pytest.raises(store.CorruptStoredRow) as error:
+        store.get_investigation(investigation_id)
+    assert error.value.table == "claim_versions"
+    assert error.value.row_id == claim_id
+    assert error.value.field == "claim_json"
+    assert claim_id in str(error.value)
 
-# 2. A record whose timestamp is not a timestamp is the same class of problem.
+    # Localised: a fresh investigation, in the same table, is created and served.
+    healthy = call("POST", "/api/investigations", json_body={"question": QUESTION})
+    assert healthy.status_code == 201, healthy.status_code
+    served = call("GET", f"/api/investigations/{healthy.json()['id']}")
+    assert served.status_code == 200, served.status_code
+    assert served.json()["claims"]
+
+
+# 2. A record whose timestamp is not a timestamp is the same class of problem —
+#    but here the read needs many rows, so the list degrades and reports the skip
+#    instead of failing every record in the table.
 def test_a_record_with_an_unparseable_timestamp_is_bounded(db):
     connection = sqlite3.connect(db)
     try:
@@ -79,9 +99,25 @@ def test_a_record_with_an_unparseable_timestamp_is_bounded(db):
     finally:
         connection.close()
 
-    response = call("POST", "/api/investigations", json_body={"question": QUESTION})
+    listed = call("GET", "/api/records")
+    assert listed.status_code == 200, listed.status_code
+    assert "BAD-TS" not in [record["id"] for record in listed.json()]
+    assert "yesterday-ish" not in listed.text
 
-    assert response.status_code in {422, 500, 503}, response.status_code
+    # The skip is reported, and it names the column to repair.
+    records, skipped = store.list_records_with_report()
+    assert [row.row_id for row in skipped] == ["BAD-TS"]
+    assert skipped[0].table == "records"
+    assert skipped[0].field == "timestamp"
+    assert records
+
+    # The write path still assesses the readable corpus.
+    response = call("POST", "/api/investigations", json_body={"question": QUESTION})
+    # A verdict is a claim about the whole corpus, so it is refused rather than
+    # computed over a corpus that is quietly missing a row. The list still degrades
+    # and reports; only the write path fails closed.
+    assert response.status_code == 503, response.status_code
+    assert "yesterday-ish" not in response.text
     assert "Traceback" not in response.text
     assert "fromisoformat" not in response.text
 

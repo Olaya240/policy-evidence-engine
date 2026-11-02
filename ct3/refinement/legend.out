@@ -1,0 +1,2 @@
+     = ([0%nat; 1%nat; 2%nat; 3%nat], [0%nat; 1%nat; 2%nat; 3%nat; 4%nat])
+     : list nat * list nat

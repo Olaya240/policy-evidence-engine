@@ -1,9 +1,40 @@
 """API schemas and typed domain models."""
+import unicodedata
 from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+# Text that is allowed to contain control characters, and why: these three are how
+# a multi-line note is written. Everything else in Unicode category Cc — NUL, ESC,
+# DEL and the C1 block — is refused at the input boundary.
+TEXT_CONTROL_CHARACTERS_ALLOWED = frozenset({"\t", "\n", "\r"})
+
+
+def _refuse_control_characters(value: str, *, field: str) -> str:
+    """Refuse C0/C1 control characters, naming the class and the code point.
+
+    A NUL used to survive into stored record text, challenge quotes and questions:
+    legal in a JSON escape, invisible in every log and terminal, and carried
+    unchanged into provider requests and quotes. Refusing it at the schema boundary
+    is the only place the caller still knows which text it sent.
+
+    The check is by Unicode category, not by ordinals, so the positive controls
+    hold: NFC/NFD, combining marks, RTL marks and other format characters (Cf),
+    U+2028/U+2029 (Zl/Zp) and emoji are all category-legal and stay accepted.
+    """
+    for index, character in enumerate(value):
+        if character in TEXT_CONTROL_CHARACTERS_ALLOWED:
+            continue
+        category = unicodedata.category(character)
+        if category == "Cc":
+            raise ValueError(
+                f"{field} must not contain control characters: "
+                f"U+{ord(character):04X} (Unicode category {category}) at index {index}"
+            )
+    return value
 
 
 class Stance(str, Enum):
@@ -120,6 +151,10 @@ class InvestigationCreate(BaseModel):
     @classmethod
     def non_blank(cls, value: object) -> object:
         if isinstance(value, str):
+            # Controls are checked before stripping: `str.strip` removes some of
+            # them, which would turn a refused character into a silently accepted
+            # shorter string.
+            _refuse_control_characters(value, field="question")
             if not value.strip():
                 raise ValueError("Question must not be blank")
             return value.strip()
@@ -141,6 +176,16 @@ class ChallengeCreate(BaseModel):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("Challenge reason must not be blank")
         return value.strip()
+
+    # A quote is matched as an exact substring of stored text, so a control
+    # character in it can only come from a client that typed one: there is no
+    # legitimate quote containing a NUL or an ESC.
+    @field_validator("quote", mode="before")
+    @classmethod
+    def quote_without_control_characters(cls, value: object) -> object:
+        if isinstance(value, str):
+            return _refuse_control_characters(value, field="Challenge quote")
+        return value
 
 
 # Ingestion MVP bound: one plain-text document per request. Sized for a shift
@@ -176,11 +221,13 @@ class IngestCreate(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=INGEST_TAG_LIMIT)
 
     # `mode="before"` so the length bounds measure the stripped value: otherwise
-    # "   x" satisfied min_length and was then stored as "x".
+    # "   x" satisfied min_length and was then stored as "x". Control characters
+    # are refused here, before stripping, for the same reason as the question.
     @field_validator("text", "department", mode="before")
     @classmethod
     def non_blank(cls, value: object) -> object:
         if isinstance(value, str):
+            _refuse_control_characters(value, field="Ingested text and department")
             if not value.strip():
                 raise ValueError("Ingested text and department must not be blank")
             return value.strip()
@@ -190,6 +237,9 @@ class IngestCreate(BaseModel):
     @classmethod
     def blank_source_group_is_absent(cls, value: object) -> object:
         if isinstance(value, str):
+            # A NUL in the group name is invisible in every log and would become part
+            # of the source's identity, so it is refused here like any other text.
+            _refuse_control_characters(value, field="source_group")
             return value.strip() or None
         return value
 
@@ -204,6 +254,7 @@ class IngestCreate(BaseModel):
         for tag in value:
             if not isinstance(tag, str):
                 return value
+            _refuse_control_characters(tag, field="tags")
             stripped = tag.strip()
             if not stripped:
                 raise ValueError("Tags must not be blank")

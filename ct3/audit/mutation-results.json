@@ -2,56 +2,96 @@
   {
     "mutation": "source-group normalisation (zero-width / NFC)",
     "status": "KILLED",
-    "detail": "1 failed, 229 passed, 2 warnings in 12.63s"
+    "detail": "1 failed, 256 passed, 2 warnings in 15.58s"
   },
   {
     "mutation": "two independent groups required for SUPPORTED",
     "status": "KILLED",
-    "detail": "1 failed, 229 passed, 2 warnings in 13.40s"
+    "detail": "1 failed, 256 passed, 2 warnings in 17.47s"
   },
   {
     "mutation": "proposal capacity budget",
     "status": "KILLED",
-    "detail": "1 failed, 236 passed, 2 warnings in 12.40s"
+    "detail": "1 failed, 263 passed, 2 warnings in 16.24s"
   },
   {
     "mutation": "provider request byte budget",
     "status": "KILLED",
-    "detail": "1 failed, 228 passed, 2 warnings in 13.00s"
+    "detail": "1 failed, 228 passed, 2 warnings in 13.71s"
   },
   {
     "mutation": "rate limiting at all",
     "status": "KILLED",
-    "detail": "1 failed, 216 passed, 2 warnings in 10.60s"
+    "detail": "1 failed, 216 passed, 2 warnings in 10.88s"
   },
   {
     "mutation": "restricted records excluded from reads",
     "status": "KILLED",
-    "detail": "1 failed, 50 passed, 2 warnings in 5.09s"
+    "detail": "1 failed, 50 passed, 2 warnings in 7.06s"
   },
   {
     "mutation": "negated propositional frame ('not true that')",
     "status": "KILLED",
-    "detail": "1 failed, 255 passed, 2 warnings in 12.39s"
+    "detail": "1 failed, 282 passed, 2 warnings in 17.77s"
   },
   {
     "mutation": "quantifier scoping in subject position",
     "status": "KILLED",
-    "detail": "1 failed, 1770 passed, 2 warnings in 32.69s"
+    "detail": "1 failed, 1839 passed, 2 warnings in 49.95s"
   },
   {
     "mutation": "fixture citation validation",
     "status": "KILLED",
-    "detail": "1 failed, 952 passed, 2 warnings in 23.81s"
+    "detail": "1 failed, 1011 passed, 2 warnings in 29.91s"
   },
   {
     "mutation": "quote grounding against the named record",
     "status": "KILLED",
-    "detail": "1 failed, 233 passed, 2 warnings in 11.80s"
+    "detail": "1 failed, 260 passed, 2 warnings in 16.65s"
   },
   {
     "mutation": "restricted records excluded from challenge",
     "status": "KILLED",
-    "detail": "1 failed, 571 passed, 2 warnings in 15.42s"
+    "detail": "1 failed, 624 passed, 2 warnings in 24.32s"
+  },
+  {
+    "mutation": "ingestion duplicate identity (dedupe lookup never matches)",
+    "status": "KILLED",
+    "detail": "1 failed, 865 passed, 2 warnings in 25.83s"
+  },
+  {
+    "mutation": "restricted rows are not a dedupe target on ingestion",
+    "status": "SURVIVED",
+    "detail": "2322 passed, 14 xfailed, 2 warnings in 48.62s"
+  },
+  {
+    "mutation": "control-character refusal at the schema boundary",
+    "status": "KILLED",
+    "detail": "1 failed, 242 passed, 2 warnings in 14.30s"
+  },
+  {
+    "mutation": "corrupt-row localisation (decoder raises instead of skipping/reporting)",
+    "status": "KILLED",
+    "detail": "1 failed, 237 passed, 2 warnings in 15.85s"
+  },
+  {
+    "mutation": "dependency-graph ordering determinism (unsorted direct set)",
+    "status": "KILLED",
+    "detail": "1 failed, 469 passed, 2 warnings in 18.19s"
+  },
+  {
+    "mutation": "dependency-graph cycle guard (visited set)",
+    "status": "HUNG",
+    "detail": "timeout after 240s: pytest never terminated"
+  },
+  {
+    "mutation": "evidence-aboutness frame ('no evidence the X was Y')",
+    "status": "KILLED",
+    "detail": "1 failed, 284 passed, 2 warnings in 16.42s"
+  },
+  {
+    "mutation": "hedge frame ('perhaps the X was Y')",
+    "status": "KILLED",
+    "detail": "1 failed, 1841 passed, 2 warnings in 43.98s"
   }
 ]

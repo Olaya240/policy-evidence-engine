@@ -241,3 +241,31 @@ def test_timestamp_comes_from_the_injectable_clock_when_the_client_supplies_none
     record_id = response.json()["id"]
     assert _parse_timestamp(response.json()["record"]["timestamp"]) == FROZEN
     assert _stored_timestamps(client.app.state.test_database_path, record_id) == [FROZEN.isoformat()]
+
+
+def test_a_restricted_row_is_never_a_duplicate_target(client):
+    """The dedupe lookup must not hand back the id of a restricted row.
+
+    This exists because a mutation of the lookup (dropping `AND restricted=0`) left the
+    whole suite green: the seeded restricted row has no `source_group`, so its identity
+    never matched. Here the restricted row is given the same text, department *and*
+    group as the incoming document, which is the only case in which the filter matters.
+    """
+    text = "The checklist binder was not available during the handover."
+    db_path = client.app.state.test_database_path
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO records(id,timestamp,department,text,tags_json,restricted,source_group)"
+            " VALUES(?,?,?,?,?,?,?)",
+            ("RESTRICTED-TWIN", "2026-05-01T09:00:00+00:00", "Front Office", text, "[]", 1, "twin-group"),
+        )
+        connection.commit()
+
+    response = client.post(
+        INSERT,
+        json={"text": text, "department": "Front Office", "source_group": "twin-group"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["id"] != "RESTRICTED-TWIN"
+    assert response.json()["created"] is True

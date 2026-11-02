@@ -24,6 +24,17 @@ REPO = Path("/home/alex/policy-evidence-fix")
 # cannot even collect. Copy the parts the suite needs, nothing more.
 NEEDED = ("backend", "scripts", "data", "pytest.ini", "README.md")
 PYTHON = "/home/alex/policy-evidence-latest/.venv/bin/python"
+# The unmutated suite takes ~47s. A mutation that removes a termination guard shows up as a
+# run that never ends rather than as a failing assertion, so the run is bounded well above the
+# control and the outcome is recorded as HUNG instead of being left to hang the audit.
+SUITE_TIMEOUT_SECONDS = 240
+# The working tree can be edited while this runs (other agents share it). One tree is
+# snapshotted and every control and mutation run is made from that snapshot, so a red control
+# means the snapshot itself is red, not that two runs saw different trees. A snapshot taken
+# mid-edit can still be red, so the control is retried a bounded number of times against a
+# fresh snapshot and the attempt that was measured is printed.
+CONTROL_ATTEMPTS = 3
+IGNORE = shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.sqlite3")
 
 MUTATIONS = [
     (
@@ -92,18 +103,77 @@ MUTATIONS = [
         "record = next((r for r in records if r.id == record_id), None)",
         "restricted records excluded from challenge",
     ),
+    # --- surface added this week -------------------------------------------------
+    (
+        "app/store.py",
+        '"SELECT * FROM records WHERE restricted=0 AND department=? AND text=? "\n'
+        "            \"AND COALESCE(source_group,'')=? ORDER BY timestamp, id LIMIT 1\"",
+        '"SELECT * FROM records WHERE restricted=0 AND department=? AND text=? AND 0 "\n'
+        "            \"AND COALESCE(source_group,'')=? ORDER BY timestamp, id LIMIT 1\"",
+        "ingestion duplicate identity (dedupe lookup never matches)",
+    ),
+    (
+        "app/store.py",
+        '"SELECT * FROM records WHERE restricted=0 AND department=? AND text=? "',
+        '"SELECT * FROM records WHERE department=? AND text=? "',
+        "restricted rows are not a dedupe target on ingestion",
+    ),
+    (
+        "app/models.py",
+        '        if category == "Cc":',
+        '        if False:  # mutation: C0/C1 control-character check disabled',
+        "control-character refusal at the schema boundary",
+    ),
+    (
+        "app/store.py",
+        "        try:\n"
+        "            records.append(_record_from_row(row))\n"
+        "        except CorruptStoredRow as error:\n"
+        "            skipped.append(error.row)",
+        "        records.append(_record_from_row(row))",
+        "corrupt-row localisation (decoder raises instead of skipping/reporting)",
+    ),
+    (
+        "app/dependency_graph.py",
+        "    return tuple(sorted(cid for cid, claim in claims.items() if record_id in _cited_record_ids(claim)))",
+        "    return list(cid for cid, claim in claims.items() if record_id in _cited_record_ids(claim))",
+        "dependency-graph ordering determinism (unsorted direct set)",
+    ),
+    (
+        "app/dependency_graph.py",
+        "            if dependent in seen or dependent not in claims:",
+        "            if dependent not in claims:",
+        "dependency-graph cycle guard (visited set)",
+    ),
+    (
+        "app/semantic_guard.py",
+        "    return _EVIDENCE_ABOUTNESS_FRAME.search(segment) is not None",
+        "    return False",
+        "evidence-aboutness frame ('no evidence the X was Y')",
+    ),
+    (
+        "app/semantic_guard.py",
+        "    return _HEDGE_FRAME.search(segment) is not None",
+        "    return False",
+        "hedge frame ('perhaps the X was Y')",
+    ),
 ]
 
 
 def run_suite(cwd: Path) -> tuple[bool, str, str]:
-    result = subprocess.run(
-        [PYTHON, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider"],
-        cwd=cwd,
-        env={"PYTHONPATH": ".:../scripts", "PATH": "/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        timeout=900,
-    )
+    try:
+        result = subprocess.run(
+            [PYTHON, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider"],
+            cwd=cwd,
+            env={"PYTHONPATH": ".:../scripts", "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            timeout=SUITE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        # No test failed, so this is not a kill under the definition used here; it is a
+        # separate outcome that says the removed control was a termination guard.
+        return False, f"timeout after {SUITE_TIMEOUT_SECONDS}s: pytest never terminated", "timeout"
     summary = result.stdout.strip().splitlines()
     tail = [line for line in summary if line.strip()][-1:] or [""]
     # A kill only counts if a test failed. A collection error kills every mutation for the
@@ -112,58 +182,80 @@ def run_suite(cwd: Path) -> tuple[bool, str, str]:
     return result.returncode == 0, tail[0], kind
 
 
+def build_copy(source_root: Path, destination: Path) -> Path:
+    """Copy the parts the suite needs from ``source_root`` and return the backend dir."""
+    for name in NEEDED:
+        source = source_root / name
+        if source.is_dir():
+            shutil.copytree(source, destination / name, ignore=IGNORE)
+        else:
+            shutil.copy2(source, destination / name)
+    return destination / "backend"
+
+
 def main() -> int:
     records = []
 
-    # Control: an unmutated copy must be green, or nothing below means anything.
-    with tempfile.TemporaryDirectory(prefix="control-") as directory:
-        root = Path(directory)
-        for name in NEEDED:
-            source = REPO / name
-            if source.is_dir():
-                shutil.copytree(source, root / name, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.sqlite3"))
-            else:
-                shutil.copy2(source, root / name)
-        green, detail, kind = run_suite(root / "backend")
-    print(f"[control] {'GREEN' if green else 'RED':5} {detail}", flush=True)
-    if not green:
-        print("CONTROL FAILED: the harness cannot measure anything until an unmutated copy passes.")
-        return 1
-    for index, (relative, old, new, description) in enumerate(MUTATIONS, start=1):
-        with tempfile.TemporaryDirectory(prefix=f"mut{index}-") as directory:
-            root = Path(directory)
-            for name in NEEDED:
-                source = REPO / name
-                if source.is_dir():
-                    shutil.copytree(source, root / name, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.sqlite3"))
-                else:
-                    shutil.copy2(source, root / name)
-            copy = root / "backend"
-            target = copy / relative
-            text = target.read_text()
-            if text.count(old) != 1:
-                records.append({"mutation": description, "status": "NOT_APPLIED", "detail": f"{text.count(old)} matches"})
-                print(f"[{index}] NOT_APPLIED  {description}", flush=True)
-                continue
-            target.write_text(text.replace(old, new))
+    with tempfile.TemporaryDirectory(prefix="mutation-audit-") as directory:
+        work = Path(directory)
+        green = False
+        detail = ""
+        # Control: an unmutated copy must be green, or nothing below means anything.
+        for attempt in range(1, CONTROL_ATTEMPTS + 1):
+            snapshot_root = work / f"snapshot{attempt}"
+            snapshot_root.mkdir()
+            snapshot = build_copy(REPO, snapshot_root)
+            green, detail, kind = run_suite(snapshot)
+            print(
+                f"[control attempt {attempt}/{CONTROL_ATTEMPTS}]"
+                f" {'GREEN' if green else 'RED':5} {detail}",
+                flush=True,
+            )
+            if green:
+                break
+        if not green:
+            print("CONTROL FAILED: the harness cannot measure anything until an unmutated copy passes.")
+            return 1
+        # Every mutation below is applied to a copy of the green snapshot, never to the
+        # working tree, so all runs in one report describe the same tree.
+        for index, (relative, old, new, description) in enumerate(MUTATIONS, start=1):
+            with tempfile.TemporaryDirectory(prefix=f"mut{index}-") as directory:
+                copy = build_copy(snapshot_root, Path(directory))
+                target = copy / relative
+                text = target.read_text()
+                if text.count(old) != 1:
+                    records.append({"mutation": description, "status": "NOT_APPLIED", "detail": f"{text.count(old)} matches"})
+                    print(f"[{index}] NOT_APPLIED  {description}", flush=True)
+                    continue
+                target.write_text(text.replace(old, new))
 
-            survived, detail, kind = run_suite(copy)
-            status = "SURVIVED" if survived else ("KILLED" if kind == "failed" else "KILLED_BY_ERROR")
-            records.append({"mutation": description, "status": status, "detail": detail})
-            print(f"[{index}] {status:15} {description} | {detail}", flush=True)
+                survived, detail, kind = run_suite(copy)
+                if survived:
+                    status = "SURVIVED"
+                elif kind == "failed":
+                    status = "KILLED"
+                elif kind == "timeout":
+                    status = "HUNG"
+                else:
+                    status = "KILLED_BY_ERROR"
+                records.append({"mutation": description, "status": status, "detail": detail})
+                print(f"[{index}] {status:15} {description} | {detail}", flush=True)
 
     applied = [record for record in records if record["status"] != "NOT_APPLIED"]
     killed = [record for record in applied if record["status"] == "KILLED"]
     errors = [record for record in applied if record["status"] == "KILLED_BY_ERROR"]
+    hung = [record for record in applied if record["status"] == "HUNG"]
     survivors = [record for record in applied if record["status"] == "SURVIVED"]
     print(
         "\napplied", len(applied), "killed-by-failure", len(killed),
-        "killed-by-error", len(errors), "survived", len(survivors),
+        "killed-by-error", len(errors), "hung", len(hung), "survived", len(survivors),
     )
     if applied:
         print("test-failure kill rate %.1f%%" % (100.0 * len(killed) / len(applied)))
     for record in errors:
         print("ERROR-KILL (not counted):", record["mutation"], "|", record["detail"])
+    for record in hung:
+        print("HUNG (not counted, no test failed):", record["mutation"], "|", record["detail"])
     for record in survivors:
         print("SURVIVOR:", record["mutation"], "|", record["detail"])
     Path("/home/alex/policy-evidence-fix/ct3/audit/mutation-results.json").write_text(

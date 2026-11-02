@@ -198,3 +198,33 @@ def test_evaluate_reports_the_same_recomputed_set():
     result = evaluate._evaluate_recomputation_history(guarded=True)
     assert result["checks"]["only_dependency_affected_claims_recomputed"] is True
     assert result["disposable_database_removed"] is True
+
+
+def test_the_cycle_guard_terminates_within_a_bounded_time():
+    """A removed visited-set does not fail this suite, it hangs it.
+
+    A hanging test is not a failing test, so the guard needs a bound: the call is
+    given one second to finish and the assertion fails on overrun instead of leaving
+    pytest waiting. Measured: with the guard the call returns in microseconds; without
+    it the same call never returns.
+    """
+    import signal
+
+    from app.dependency_graph import transitive_dependents
+
+    claims = {
+        "a": {"evidence": [{"source_record_id": "r1"}], "dependencies": ["r1"]},
+        "b": {"evidence": [{"source_record_id": "r1"}], "dependencies": ["r1"]},
+    }
+    edges = {"a": ["b"], "b": ["a"]}
+
+    def _alarm(signum, frame):  # pragma: no cover - only on overrun
+        raise TimeoutError("transitive_dependents did not terminate on a cycle")
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+    try:
+        assert transitive_dependents(claims, "r1", claim_edges=edges) == ("a", "b")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)

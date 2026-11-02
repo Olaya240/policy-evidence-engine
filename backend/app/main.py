@@ -300,9 +300,21 @@ def health() -> dict:
 
 
 @app.get("/api/records", response_model=list[Record])
-def records() -> list[Record]:
+def records(response: Response) -> list[Record]:
+    """The readable corpus, with the skipped rows named in headers.
+
+    A list read needs many rows and no row in particular, so one corrupt record
+    must not make the corpus unreadable. It must also not be silent: the caller
+    learns the count and the ids from `X-Unreadable-Rows` /
+    `X-Unreadable-Row-Ids`, because "skipped and reported" is false if only the
+    server log knows.
+    """
     require_database()
-    return visible_records(store.list_records())
+    rows, skipped = store.list_records_with_report()
+    if skipped:
+        response.headers["X-Unreadable-Rows"] = str(len(skipped))
+        response.headers["X-Unreadable-Row-Ids"] = ",".join(row.row_id for row in skipped)[:1024]
+    return visible_records(rows)
 
 
 @app.post("/api/records/ingest", status_code=201)
@@ -332,7 +344,16 @@ def create_investigation(payload: InvestigationCreate) -> dict:
             raise HTTPException(status_code=422, detail="Question does not match the selected investigation preset.")
         question = expected_question
         hypothesis_id = INVESTIGATION_PRESET_HYPOTHESES[preset_id]
-    records = store.list_records()
+    # A verdict is a claim about the whole corpus. If part of it cannot be read, the
+    # verdict would be computed over a corpus that is quietly shorter than the one the
+    # caller believes is there, so this fails closed and names the row instead. The
+    # list route degrades because inspecting a corpus is not a claim about it.
+    records, skipped = store.list_records_with_report()
+    if skipped:
+        first = skipped[0]
+        raise store.CorruptStoredRow(
+            table=first.table, row_id=first.row_id, field=first.field, reason=first.reason
+        )
     claims = ([engine.assess_hypothesis(records, hypothesis_id)]
               if hypothesis_id is not None else engine.investigate(records))
     result = store.create_investigation(question, claims)

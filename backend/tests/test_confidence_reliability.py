@@ -5,6 +5,19 @@ The question: does the number a caller reads as `confidence` deserve to be read?
 stated over `score` and then re-read through `confidence`, over an exhaustive
 enumeration of the two group counts rather than a sample.
 
+**What `confidence` means now.** The verdict is reported as a truth interval —
+`Decision.truth_lower`/`truth_upper`, see `app.decision_table` and
+`tests/test_truth_interval.py` — and `confidence` is its projection onto the
+strength axis: `abs(score)`, the magnitude of the *reported point* of the
+interval, with the sign dropped. The value does not change; the claim does. It is
+no longer "the strength of the verdict" but "the strength of one admissible
+reading of it", so it cannot distinguish a decided verdict from an interval that
+still contains one, and nothing derives a status from it: `decide`'s label is the
+v2 rule, the interval's label is read off the two ends, and the same projected
+number carries three different statuses on the 441-row grid
+(`test_the_projection_is_not_used_for_the_status`). `Claim.confidence` keeps its
+value and its `ge=0, le=1` bound; what it names is that projection.
+
 Grids, named so `ct3/audit/CONFIDENCE-CALIBRATION.md` can cite them:
 
     U   s, c in 0..6                                               49 configurations
@@ -35,6 +48,7 @@ and the single-source row (1, 0) is the most common real configuration.
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 from itertools import permutations
 
@@ -353,3 +367,90 @@ def test_permuting_a_support_only_list_cannot_move_the_decision():
 
     for order in permutations(records):
         assert decide_evidence(list(order)) == base
+
+
+# Measured discontinuity at a status switch, pinned rather than fixed away.
+#
+# `decide` reports the *settled* configuration's score, except when the challenged
+# configuration changes the label — then it reports the challenged one, so a PARTIAL
+# verdict cannot advertise the strength of evidence whose support is exactly what is
+# being challenged. That switch is where monotonicity breaks: the two configurations
+# are ordered independently, so at a switch point more support can mean a lower score.
+#
+#   decide(1, 0, disputed_contradiction=1) -> PARTIAL, 0.50   (status unchanged)
+#   decide(2, 0, disputed_contradiction=1) -> PARTIAL, 0.25   (status switched)
+#
+# Both verdicts are defensible; the pair cannot both hold. Monotonicity is the one
+# that gives, and this test keeps the cost visible instead of letting a future change
+# restore monotonicity by silently re-advertising a challenged configuration.
+def test_the_reported_score_is_discontinuous_exactly_at_a_status_switch():
+    from app.decision_table import decide
+
+    settled_below, settled_above = decide(1, 0), decide(2, 0)
+    below = decide(1, 0, disputed_contradiction=1)
+    above = decide(2, 0, disputed_contradiction=1)
+
+    # The settled evidence strengthens with support; the reported score does not.
+    assert settled_above.score > settled_below.score
+    assert below.score > above.score
+    assert below.status is Status.PARTIAL and above.status is Status.PARTIAL
+
+    # Only the higher row crossed a label boundary, which is what moved the number.
+    assert above.status_rule_id == "STATUS.V2_DISPUTED_EVIDENCE_DECISION_RELEVANT"
+    assert below.status_rule_id == "STATUS.V2_DIRECTIONAL_EVIDENCE_BALANCED"
+    assert above.score < 0.5 <= below.score
+
+    # And the same magnitude can carry two statuses, so score alone never implies one.
+    assert decide(4, 1).status is Status.SUPPORTED and decide(4, 1).score == 0.5
+    assert decide(1, 0).status is Status.PARTIAL and decide(1, 0).score == 0.5
+
+
+# ---------------------------------------------------------------------------
+# 7. The projection is a projection: no status is read off it
+# ---------------------------------------------------------------------------
+
+def test_the_projection_is_not_used_for_the_status():
+    """`confidence` is a projection of the interval, never the input to a label.
+
+    The value is unchanged (`abs(score)`) so existing consumers keep working, but
+    the claim is narrowed to one admissible reading: the magnitude of the reported
+    point. A label cannot be a function of it. On this grid the same projected
+    number carries up to three statuses — 0.5 is PARTIAL in 17 rows, CONTRADICTED
+    in 6 and SUPPORTED in 3, and 0.0 is INSUFFICIENT in one row and PARTIAL in 60
+    — so a consumer that infers a label from `confidence` is wrong in 9 of the 24
+    projected values that occur, and the labels come from the interval's two ends
+    (`Decision.truth_lower`/`truth_upper`, `tests/test_truth_interval.py`).
+    """
+    by_confidence: dict[float, Counter[str]] = {}
+    for row in DISPUTED:
+        decision = dec(row)
+        assert decision.confidence == abs(decision.score), row
+        # The projection is the reported point, and the point is inside the report.
+        assert decision.truth_lower <= decision.score <= decision.truth_upper, row
+        by_confidence.setdefault(decision.confidence, Counter())[decision.status.value] += 1
+
+    multi = {value: counts for value, counts in by_confidence.items() if len(counts) > 1}
+    print(
+        f"projection: {len(by_confidence)} distinct confidences, "
+        f"{len(multi)} carry more than one status"
+    )
+    assert len(by_confidence) == 24
+    assert len(multi) == 9
+    assert dict(by_confidence[0.5]) == {"PARTIAL": 17, "CONTRADICTED": 6, "SUPPORTED": 3}
+    assert dict(by_confidence[0.0]) == {"INSUFFICIENT": 1, "PARTIAL": 60}
+
+    # The witness pair: one projected value, two verdicts, and the interval is what
+    # separates them. (4, 1) is decisive under every settlement; (1, 0) is
+    # undecided under the v2 guard and its interval still reaches the floor.
+    assert decide(4, 1).confidence == decide(1, 0).confidence == DECISIVE_FLOOR
+    assert decide(4, 1).status is Status.SUPPORTED
+    assert decide(1, 0).status is Status.PARTIAL
+    assert decide(1, 0).truth_lower == DECISIVE_FLOOR
+    assert decide(1, 0).interval_status is Status.SUPPORTED
+
+    # And the projection never stands in for an end: a claim whose interval still
+    # straddles the floor can project above it.
+    straddling = decide(2, 0, disputed_contradiction=1)
+    assert straddling.confidence < DECISIVE_FLOOR
+    assert straddling.interval_status is Status.PARTIAL
+    assert straddling.truth_lower < DECISIVE_FLOOR < straddling.truth_upper

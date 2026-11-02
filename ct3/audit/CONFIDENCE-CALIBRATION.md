@@ -214,3 +214,37 @@ which is why it must never be read there without `status_rule_id`.
   disputed path remains as `ct3/W9-proof-gap.md` records it — unchecked here.
 * Nothing outside the repository was consulted; no claim here depends on deployment, traffic or
   an external consumer of `confidence`.
+
+
+## Resolution of finding 2 (monotonicity at a status switch)
+
+**Not a repaired bug — a chosen trade, now measured and pinned.**
+
+`decide` reports the settled configuration's score, except when the challenged configuration
+changes the label; then it reports the challenged one. Monotonicity fails exactly at those
+switch points, and nowhere else in the undisputed grid:
+
+| configuration | status | score | rule |
+|---|---|---|---|
+| `decide(1, 0)` | PARTIAL | 0.50 | `STATUS.V2_DIRECTIONAL_EVIDENCE_BALANCED` |
+| `decide(2, 0)` | SUPPORTED | 0.667 | `STATUS.V2_SUPPORT_OUTWEIGHS_CONTRADICTION` |
+| `decide(1, 0, disputed_contradiction=1)` | PARTIAL | 0.50 | balanced |
+| `decide(2, 0, disputed_contradiction=1)` | PARTIAL | **0.25** | `STATUS.V2_DISPUTED_EVIDENCE_DECISION_RELEVANT` |
+
+More settled support, a lower reported score: 0.50 → 0.25. The pair of desiderata —
+*monotone score* and *a withheld verdict never advertises the strength of the evidence under
+challenge* — cannot both hold, because the second forces the number to be taken from a
+different configuration at the switch while the first compares numbers across it.
+
+**Choice: status integrity wins.** A reader who sees PARTIAL is being told "this is not
+settled"; a number that rose with support would contradict that sentence. Restoring
+monotonicity requires either (a) reporting the settled configuration always — then a PARTIAL
+claim can carry 0.667 and a consumer reading score alone infers SUPPORTED, or (b) making score
+a function of the label as well as the counts, which makes it no longer a function of the
+evidence. Both are worse for a decision-support tool, so the discontinuity is documented in
+`decide`'s docstring and pinned by
+`test_the_reported_score_is_discontinuous_exactly_at_a_status_switch`.
+
+**Also measured, unchanged:** one magnitude can carry two statuses — `decide(4, 1)` is
+SUPPORTED at 0.50 and `decide(1, 0)` is PARTIAL at 0.50. So `score` never implies a status;
+only `status` does. That is a property of the shipped rule, not a defect introduced here.

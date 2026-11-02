@@ -259,7 +259,7 @@ def test_create_investigation_response_preserves_engine_review_states_without_da
            if hypothesis.id != "CHECKLIST_UNAVAILABLE"},
     })
     monkeypatch.setattr(main_module, "engine", AssessmentEngine(provider))
-    monkeypatch.setattr(store, "list_records", lambda: [source])
+    monkeypatch.setattr(store, "list_records_with_report", lambda **_: ([source], ()))
     monkeypatch.setattr(
         store,
         "create_investigation",
@@ -297,7 +297,7 @@ def test_selected_preset_assesses_only_its_mapped_hypothesis_without_database(
     hypothesis_id = INVESTIGATION_PRESET_HYPOTHESES[preset_id]
     provider = MockProvider()
     monkeypatch.setattr(main_module, "engine", AssessmentEngine(provider))
-    monkeypatch.setattr(store, "list_records", lambda: SEED_RECORDS)
+    monkeypatch.setattr(store, "list_records_with_report", lambda **_: (SEED_RECORDS, ()))
     persisted = {}
 
     def capture_create(selected_question, claims):
@@ -342,7 +342,7 @@ def test_selected_preset_validation_rejects_unknown_or_inconsistent_selection(
     mocked_read_client, monkeypatch, request_body,
 ):
     accessed_records = []
-    monkeypatch.setattr(store, "list_records", lambda: accessed_records.append(True) or [])
+    monkeypatch.setattr(store, "list_records_with_report", lambda **_: (accessed_records.append(True) or [], ()))
     monkeypatch.setattr(store, "create_investigation", lambda *_args: pytest.fail("must not persist invalid selection"))
 
     response = mocked_read_client.post("/api/investigations", json=request_body)

@@ -1,0 +1,5 @@
+sat
+(
+  (define-fun gap () Real
+    (/ 1.0 4.0))
+)

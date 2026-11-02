@@ -41,6 +41,53 @@ outside the Coq model.
 Deliberately *not* in the score: staleness, review state, dispute status, neutral
 stance, department diversity. Those are reported as separate fields so that a
 number which moved always has an arithmetic explanation.
+
+**The truth interval (v3): one scalar cannot hold both laws.**
+
+A single number has to answer two questions at once — where is the verdict, and
+how sure is it — and every rule that squeezed both into one number broke one of
+the two laws a reader relies on: monotonicity (more support never weakens the
+verdict) or label consistency (the label agrees with the number). `decide`'s
+dispute rule is the shipped example: to stop a PARTIAL verdict from advertising
+the strength of evidence whose support is exactly what is challenged, it
+re-prices the score to the challenged configuration, and the reported number
+then falls as support is added (`test_confidence_reliability.py`,
+``test_the_reported_score_is_discontinuous_exactly_at_a_status_switch``).
+
+So the verdict is reported as an *interval* instead:
+
+    truth_lower = score(s, c + dc)      every pending challenge lands against
+    truth_upper = score(s + ds, c)      every pending challenge lands for
+
+where ``ds``/``dc`` are the groups a human has challenged (0 when none have).
+The interval is the set of readings the evidence admits across every settlement
+of the pending challenges, so it answers "where is the verdict" and "how sure"
+separately: a wide interval is uncertain *because it is wide*, not because one
+number came out small. Status is then a statement about the whole interval
+(``truth_interval``):
+
+    INSUFFICIENT   no admissible evidence and nothing pending
+    SUPPORTED      truth_lower >= 0.5      decisive under every settlement
+    CONTRADICTED   truth_upper <= -0.5     decisive under every settlement
+    PARTIAL        otherwise; direction only when the interval misses zero
+
+All four interval laws — order, both monotonicities in the counts, both in the
+disputed counts, and label consistency — hold on the full grid in
+``tests/test_truth_interval.py``. The interval is built from ``score`` and not
+from the bare ratio ``(s - c) / (s + c)``: the bare ratio saturates at +/-1 as
+soon as one side is empty, so ``score(5, 0) == score(6, 0)`` and *nothing* can be
+strictly monotone at the top of the range. The laws themselves do not depend on
+the smoothing — ``test_the_interval_laws_also_hold_for_the_unsmoothed_ratio``
+re-checks order and monotonicity against the bare ratio — but the strictness of
+the shipped scalar does.
+
+``decide`` keeps its v2 label rule, and the interval does not silently replace
+it: ``Decision.status`` is still the rule proved in ``ct3/DecisionTable.v``, while
+``Decision.interval_status`` is the interval reading. The two differ exactly where
+the single-source guard withdraws a label the raw margin would grant — (1, 0) is
+v2 PARTIAL and interval SUPPORTED — so a caller that wants one source to stay
+undecisive must read ``status``, and a caller that wants the margin must read the
+interval. Unifying them is a change to the proved table, not to this module.
 """
 
 from __future__ import annotations
@@ -103,12 +150,181 @@ MIN_SUPPORT_GROUPS = POLICY_SIGNED_MARGIN.min_support_groups
 IMBALANCE_PER_GROUP = POLICY_SIGNED_MARGIN.imbalance_per_group
 
 
+# Rule ids for the interval reading, kept distinct from the STATUS.V2_* ids so a
+# consumer can tell which rule produced the label it is holding.
+INTERVAL_SUPPORTED = "STATUS.V3_INTERVAL_SUPPORTED"
+INTERVAL_CONTRADICTED = "STATUS.V3_INTERVAL_CONTRADICTED"
+INTERVAL_PARTIAL = "STATUS.V3_INTERVAL_PARTIAL"
+INTERVAL_INSUFFICIENT = "STATUS.V3_INTERVAL_NO_ADMISSIBLE_EVIDENCE"
+
+# The decisive floor on the signed axis: the bounds a verdict has to clear under
+# every settlement of the pending challenges.
+DECISIVE_LOWER_BOUND = 0.5
+DECISIVE_UPPER_BOUND = -0.5
+
+
+def truth_lower(
+    support_groups: int,
+    contradiction_groups: int,
+    disputed_contradiction: int = 0,
+) -> float:
+    """Weakest reading the evidence admits: every challenged group lands against.
+
+    Only the disputed *contradictions* widen this end; challenged support cannot
+    lower the lower bound, because the lower bound already ignores it.
+    """
+    if disputed_contradiction < 0:
+        raise ValueError("disputed counts must be non-negative")
+    return score(support_groups, contradiction_groups + disputed_contradiction)
+
+
+def truth_upper(
+    support_groups: int,
+    contradiction_groups: int,
+    disputed_support: int = 0,
+) -> float:
+    """Strongest reading the evidence admits: every challenged group lands for."""
+    if disputed_support < 0:
+        raise ValueError("disputed counts must be non-negative")
+    return score(support_groups + disputed_support, contradiction_groups)
+
+
+def interval_status(
+    support_groups: int,
+    contradiction_groups: int,
+    disputed_support: int = 0,
+    disputed_contradiction: int = 0,
+) -> tuple[Status, str]:
+    """The v3 label: a statement about the interval, never about one number.
+
+    ``INSUFFICIENT`` is the row with nothing admissible and nothing pending. A row
+    whose only directional evidence is challenged is ``PARTIAL``, not empty: an
+    unresolved challenge is uncertainty about a record that exists, and the
+    interval it produces (``[score(0, 0), score(ds, 0)]``) contains zero, so it
+    cannot be misread as support.
+    """
+    lower = truth_lower(support_groups, contradiction_groups, disputed_contradiction)
+    upper = truth_upper(support_groups, contradiction_groups, disputed_support)
+    if support_groups == contradiction_groups == 0 and not (disputed_support or disputed_contradiction):
+        return Status.INSUFFICIENT, INTERVAL_INSUFFICIENT
+    if lower >= DECISIVE_LOWER_BOUND:
+        return Status.SUPPORTED, INTERVAL_SUPPORTED
+    if upper <= DECISIVE_UPPER_BOUND:
+        return Status.CONTRADICTED, INTERVAL_CONTRADICTED
+    return Status.PARTIAL, INTERVAL_PARTIAL
+
+
+@dataclass(frozen=True)
+class TruthInterval:
+    """A verdict as two numbers instead of one.
+
+    ``truth_lower``/``truth_upper`` are the weakest and strongest readings the
+    evidence admits once every pending challenge is settled (see the module
+    docstring). The interval is the report; ``status`` is what the interval says;
+    ``magnitude`` is a projection for callers that still need one number, and
+    nothing in here derives the status from it.
+    """
+
+    truth_lower: float
+    truth_upper: float
+    support_groups: int
+    contradiction_groups: int
+    disputed_support: int
+    disputed_contradiction: int
+    status: Status
+    status_rule_id: str
+
+    def __post_init__(self) -> None:
+        # Order is an invariant of the report, not a convention: a consumer that
+        # reads only one end of it must not be able to read the two ends in the
+        # wrong order, so a swapped construction fails at the construction site
+        # rather than quietly reporting an inverted interval.
+        if self.truth_lower > self.truth_upper:
+            raise ValueError(
+                "truth_lower must not exceed truth_upper: "
+                f"{self.truth_lower} > {self.truth_upper}"
+            )
+
+    @property
+    def intervals_contain_zero(self) -> bool:
+        return self.truth_lower <= 0.0 <= self.truth_upper
+
+    @property
+    def direction(self) -> str:
+        """`FOR`, `AGAINST` or `NONE`, and `NONE` whenever zero is in reach.
+
+        The direction is only stated when the *whole* interval is on one side, so
+        a challenged record that could flip the verdict withholds the direction
+        instead of guessing which way the review will land.
+        """
+        if self.truth_lower > 0.0:
+            return "FOR"
+        if self.truth_upper < 0.0:
+            return "AGAINST"
+        return "NONE"
+
+    @property
+    def magnitude(self) -> float:
+        """Projection of the interval onto the strength axis.
+
+        The greatest strength any admissible settlement reaches, so a straddling
+        interval reports 1.0: some settlement is total. It is not
+        ``Decision.confidence`` (that is the magnitude of the reported point) and
+        it is not a probability; ``test_truth_interval.py`` pins rows where it
+        and ``status`` disagree, which is why it cannot stand in for the status.
+        """
+        return max(abs(self.truth_lower), abs(self.truth_upper))
+
+
+def truth_interval(
+    support_groups: int,
+    contradiction_groups: int,
+    *,
+    disputed_support: int = 0,
+    disputed_contradiction: int = 0,
+) -> TruthInterval:
+    """The verdict as a truth interval.
+
+    No as-if re-pricing happens here, and none is needed: the interval already
+    spans every settlement of the challenged groups, so the discontinuity that
+    monotonicity died at in ``decide`` cannot arise. Adding an admissible support
+    group raises ``truth_lower`` and ``truth_upper`` together; adding a
+    challenged contradiction lowers only ``truth_lower``, which is what uncertainty
+    about a challenge should do.
+    """
+    status, status_rule = interval_status(
+        support_groups,
+        contradiction_groups,
+        disputed_support,
+        disputed_contradiction,
+    )
+    return TruthInterval(
+        truth_lower=truth_lower(support_groups, contradiction_groups, disputed_contradiction),
+        truth_upper=truth_upper(support_groups, contradiction_groups, disputed_support),
+        support_groups=support_groups,
+        contradiction_groups=contradiction_groups,
+        disputed_support=disputed_support,
+        disputed_contradiction=disputed_contradiction,
+        status=status,
+        status_rule_id=status_rule,
+    )
+
+
 @dataclass(frozen=True)
 class Decision:
-    """Result of the table. ``score`` is signed; ``confidence`` is its magnitude."""
+    """Result of the table.
+
+    ``score`` is signed and, with ``confidence``, is a *projection* of the verdict;
+    ``truth_lower``/``truth_upper`` are the verdict. ``status`` is the v2 label
+    rule (the one proved in ``ct3/DecisionTable.v``); ``interval_status`` is the
+    label the interval itself supports. See ``confidence``.
+    """
 
     status: Status
     score: float
+    truth_lower: float
+    truth_upper: float
+    interval_status: Status
     support_groups: int
     contradiction_groups: int
     disputed_groups: int
@@ -119,12 +335,24 @@ class Decision:
 
     @property
     def confidence(self) -> float:
-        """Magnitude only, kept for the shipped `Claim.confidence` field.
+        """Projection of the truth interval onto the strength axis: ``|score|``.
 
-        A magnitude alone collides across directions by construction: one
-        support group and one contradiction group are both 0.5. It is only
-        meaningful together with ``direction`` or ``status``, which is why both
-        travel with it in the trace.
+        What it means now: the magnitude of the *reported point* of the truth
+        interval. ``score`` is the reading of the counts ``decide`` reports — the
+        settled counts, or the challenged configuration when the challenge is
+        decision-relevant — and that reading lies inside ``[truth_lower,
+        truth_upper]`` (pinned by
+        ``tests/test_truth_interval.py::test_the_reported_score_lies_inside_the_interval``).
+        So ``confidence`` is one point of the interval with the sign dropped, not
+        a summary of the interval and not a probability.
+
+        The value is unchanged from v2 (``abs(score)``, the shipped
+        ``Claim.confidence`` field), and it is deliberately *not* what any status
+        is derived from: the label comes from the bounds, so this number cannot
+        express that a challenge is pending or that the evidence is undecided.
+        A magnitude alone also collides across directions by construction — one
+        support group and one contradiction group are both 0.5 — which is why
+        ``direction`` and the interval travel with it.
         """
         return abs(self.score)
 
@@ -278,10 +506,29 @@ def decide(
             # undisputed evidence as if the challenge were settled. Report the
             # challenged configuration; otherwise a PARTIAL claim could carry
             # +0.667 and a consumer reading score alone would infer SUPPORTED.
+            #
+            # Known cost, pinned by
+            # `tests/test_confidence_reliability.py::test_the_reported_score_is_discontinuous_exactly_at_a_status_switch`:
+            # the two configurations are ordered independently, so the reported
+            # score is *not* monotone in the undisputed support at a switch point.
+            # decide(1,0,disputed_contradiction=1) is 0.50 and
+            # decide(2,0,disputed_contradiction=1) is 0.25. Status integrity was
+            # chosen over monotonicity; restoring monotonicity would mean
+            # advertising the strength of evidence that is exactly what is doubted.
             effective_s, effective_c = s + disputed_support, c + disputed_contradiction
-    return Decision(
+    # The interval is reported from the counts the caller can verify, widened by the
+    # challenged groups, so the reported point above always lies inside it. The
+    # interval label is computed here rather than by the as-if rule because the
+    # interval does not need a settlement to be chosen: every settlement is in it.
+    lower = truth_lower(s, c, disputed_contradiction)
+    upper = truth_upper(s, c, disputed_support)
+    interval_label, _ = interval_status(s, c, disputed_support, disputed_contradiction)
+    return    Decision(
         status=status,
         score=score(effective_s, effective_c),
+        truth_lower=lower,
+        truth_upper=upper,
+        interval_status=interval_label,
         support_groups=s,
         contradiction_groups=c,
         disputed_groups=reported_disputed,

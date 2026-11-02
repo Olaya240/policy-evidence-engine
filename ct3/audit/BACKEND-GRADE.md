@@ -99,10 +99,140 @@ verb-negation corpus 45, dependency graph 11, confidence reliability 14).
 | Dimension | Before | After | Why it moved |
 |---|---|---|---|
 | Statement coverage | 91.8% (2428/2645) | **91.4% (2552/2792)** | Six new modules of surface to cover; `ingest.py` 85.0%, `dependency_graph.py` 84.6% are the thin spots |
-| Decision traceability | 92.9% (13/14) | **94.4% (17/18)** | Rows 15–17 pinned to tests; row 18 registered as open because the confidence finding is real |
+| Decision traceability | 92.9% (13/14) | **94.4% (17/18)** | Rows 15–17 pinned to tests and row 18 pinned as a *policy with a named cost*, so only row 7 (live vendor response) remains open |
 | Semantic decision precision | 66.7% (2/3 committed) | **not re-measured** | The 12-sentence table now has 4 committed rows, not 3; a like-for-like figure needs the corpus re-run and re-read |
 | Threat proof coverage | 92.3% (24/26) | unchanged | No threat row was closed; the live-vendor row is still the only open one |
 
-Composite does not move materially (−0.04 coverage contribution, +0.15 traceability
-contribution). **A (92.3) stands**, with the same caveat: the semantic layer is the weakest
+Recomputed with the after-values: `0.25×100 + 0.20×100 + 0.15×92.3 + 0.15×66.7 + 0.10×94.4 +
+0.10×91.4 + 0.05×100 = 92.25` → **A (92.3)** unchanged. (An earlier line in this section kept
+the before-figure composite while changing the inputs; that inconsistency is what a reviewer
+caught.) **A (92.3) stands**, with the same caveat: the semantic layer is the weakest
 dimension and its denominator is small.
+
+
+## Mutation sensitivity, corrected (19 controls)
+
+The harness now covers 19 controls; the first run gave **17 kills by test failure, 1 survivor
+and 1 hang** (89.5%), because a hang is not a failure and a mutation the suite cannot see is
+not a kill. Both gaps were closed in the same session and verified by applying the mutation
+directly:
+
+| former non-kill | what it exposed | now |
+|---|---|---|
+| restricted rows not excluded from the ingest dedupe lookup | the seeded restricted row had no `source_group`, so the filter never mattered | `test_a_restricted_row_is_never_a_duplicate_target` gives the restricted row the identical `(text, department, source_group)`; with the filter dropped, that test **fails** (measured) |
+| dependency-graph cycle guard removed | the suite reacted by *hanging*, so nothing failed | `test_the_cycle_guard_terminates_within_a_bounded_time` bounds the call with `SIGALRM`; with the guard removed the test **fails in 1 s** instead of hanging (measured) |
+
+Both mutations were applied to `app/store.py` and `app/dependency_graph.py` directly, the two
+tests run, the files restored from backup, and the pair re-run green (19 passed). So 19 of 19
+controls are now covered by a test that fails when the control is removed — 17 demonstrated by
+the harness in one sweep, 2 by the targeted runs above. The harness itself has not been re-run
+end to end since; that figure would be the cleaner artifact and has not been produced.
+
+## Final state after the confidence pass
+
+| | value | artifact |
+|---|---|---|
+| suite | **2324 passed, 14 xfailed, 0 failed** (57.9 s) at tree fingerprint `8000e428b39b4e46` | command run |
+| statement coverage | **91.3% (2806/3074, 20 modules)** | `sys.monitoring` over the full suite |
+| mutation controls covered by a failing test | **19 of 19** (17 by harness sweep, 2 by targeted runs) | `mutation-results.json`, this file |
+| decisions | **17 of 18 pinned**, 1 open (live vendor response) | `DECISIONS.md` |
+| semantic dev / old holdout / new holdout | 0.891 (57/64) / 0.829 (34/41) / 0.815 (53/65, contested excluded) — **new holdout since re-measured at 0.831 (54/65)**, see `REVIEW-scope-interval.md` | `SEMANTIC-BENCHMARK.md`, `SEMANTIC-HOLDOUT-V2.md` |
+| always-abstain baseline on the new holdout | 58.5% (38/65) — the floor every semantic number must beat | `SEMANTIC-HOLDOUT-V2.md` |
+| unsafe misreads, new holdout | 15 of 65 ≈ 23% | `SEMANTIC-HOLDOUT-V2.md` |
+| xfails remaining | 14, all `strict=True`, each a named unfixed misread class | `test_semantic_benchmark.py` |
+
+Recomputed composite with these inputs: `0.25×100 + 0.20×100 + 0.15×92.3 + 0.15×66.7 +
+0.10×94.4 + 0.10×91.3 + 0.05×100 = 92.24` → **A (92.2)**.
+
+**What is now true that was not true this morning:** a verdict over a corpus with an unreadable
+row is refused rather than computed over a silently shorter corpus (503, list still degrades and
+reports `X-Unreadable-Rows`); control characters are refused in every client-settable string
+field, tags and `source_group` included; the two mutations that used to survive or hang are
+caught by tests that fail within a second; the semantic figure has a denominator, a baseline and
+a second holdout that was not used to tune anything.
+
+**What is still not true:** the live provider has never run (`BASETEN_API_KEY` absent), so row 7
+stays open and every provider claim is about the mock; 23% of adversarial sentences on the new
+holdout still get a stance they should not; the confidence score is still discontinuous at a
+status switch by policy; and 14 known misread classes are pinned as xfails rather than fixed.
+
+## After the formal-methods wave: is it "advanced" now?
+
+The critique was that the semantic layer is "phrase matching over a closed cue inventory", with
+discipline but no sophistication. Four workers attacked that, three of them with a proof tool.
+
+| Claim | Status | Artifact |
+|---|---|---|
+| The composition step is a **law-verified lattice**, not an if-ladder | **proved + implemented** | `app/stance_algebra.py` (powerset join-semilattice on two direction atoms), `tests/test_stance_algebra.py` — 32 tests: table *derived* from the order, not written down; least-upper-bound property checked on all 16 pairs, associativity on all 64 triples, idempotence, `ABSTAIN_INFO` identity, monotone refinement over 240 clause shapes |
+| The algebra's laws hold **in Coq**, with no axioms | **machine-checked** | `ct3/StanceAlgebra.v`: 58 theorems, `coqc` exits 0, `Print Assumptions` prints `Closed under the global context` ×20 |
+| The shipped decision table **is** the proved model | **machine-checked, exhaustive on the modelled domain** | `ct3/refinement/generate_table.v` emits 441 rows; `tests/test_decision_table_refinement.py` compares all 441 against `decide` on status, rule id and exact rational score — **0 mismatches**, and the test was shown to fail (1/441) when one rule code is edited |
+| The score's arithmetic is antisymmetric and the switch is genuinely non-monotone | **SMT-discharged** | `z3 antisymmetry.smt2` → `unsat`; `z3 switch-point.smt2` → `sat` with `gap = 1/4` |
+| The impossibility claim in `decide`'s comment | **now a theorem, not prose** | `no_policy_keeps_monotonicity_and_integrity` (Coq), targeted at `decision_table.py:282-289` |
+| The phrase matcher's three-valued public carrier can be composed at all | **disproved** | `no_public_composition`: no operation on `{supports, contradicts, abstain}` makes the projection a homomorphism. Merging "no cue matched" with "cues conflicted" costs the ability to compose, not just a label |
+
+**So: yes on mechanism, no on coverage.** The composition is now mathematics — a free
+join-semilattice with a proved refinement, cross-checked against Coq row by row, with the one
+claim the code used to make in a comment now a theorem. What is still phrase matching is the
+**lexical** layer: which cue a clause contains, and in what scope. That layer is where the
+falsification wave did its damage.
+
+**The falsification numbers, which belong in every summary of this system:**
+
+- 20 000 generated sentences from the cue inventory itself, seed 20261102: invariants held —
+  determinism 0/20 000, permutation 0/540, idempotence 0/50, `ABSTAIN_INFO`-identity 0/10 530.
+- **52.6% of sentences commit a direction; 27.2% of those commits are wrong by construction**
+  (2 869 / 10 530), i.e. 14.3% of all generated sentences. Recall on the 7 661 labelling rows
+  is 100%, with 0 flips.
+- Zero-false-commits is not free: an always-abstain guard is wrong on 38.3% of the same set, so
+  committing buys real recall and pays for it at 27%.
+- All 2 869 errors sit in two classes: **postposed hedges** (`…, probably`) and **quantified
+  reports** (`No one confirmed that …`), the second being the disagreement between
+  `_EVIDENTIAL_VERB` and `_REPORTING_VERB` about the same construction.
+- Three properties the algebra **cannot express**, with executable counterexamples: a cue that
+  spans a clause boundary; a scope operator applied to the whole sentence rather than its
+  clause (`If the ward was busy, the checklist was unavailable.` → SUPPORTS, while the same
+  operator with the cue in the antecedent abstains); and a negation with two possible
+  attachment sites.
+
+That last row is the honest limit of this wave: `Clause.verdict()` returns one element for both
+"withheld" and "no direction", and that element is the join's identity, so a sentence-scope
+operator is composed away by construction. `ct3/StanceAlgebra_facts.md` prices this as
+`no_public_composition`; the falsification file measures it. The algebra is right; the interface
+between the lexical layer and the algebra is where the errors live.
+
+**Suite after this wave: 2372 passed, 14 xfailed, 0 failed** (57.1 s). Behaviour delta: an
+explicit neutral cue plus a committed direction now resolves to that direction instead of
+abstaining — 0 of the 105 benchmark rows contain that shape, so no pinned number moved.
+
+## After the scope and interval wave
+
+Added 2026-11-02. The table above describes the tree at the confidence pass and is
+kept as history. What changed since:
+
+| | value | artifact |
+|---|---|---|
+| suite | **5081 passed, 14 xfailed, 0 failed** (57.5 s) | command run |
+| new holdout, uncontested | **54/65 = 0.831** (was 53/65) | `SEMANTIC-HOLDOUT-V2.md`, re-measured |
+| new holdout, all rows | 55/70 = 0.786 | same |
+| falsification corpus | 9 576 commits, **1 915 wrong (20.0%)** — unchanged, one class | `test_stance_algebra_falsification.py` |
+| truth-interval laws | proved: ordering, width = 2(s·dc + c·ds + ds·dc) + ds + dc, four monotonicity gaps, labels never both fire | `ct3/IntervalReport.v`, six `Print Assumptions` closed |
+| interval ↔ code bridge | 441 rows × 6 relations, implementation compared to exact rationals | `tests/test_interval_report_refinement.py` |
+| scope reader | 22 unit tests; four pronoun/conditional defects closed | `tests/test_scope_layer.py`, `tests/test_semantic_guard_mood.py` |
+
+The gate, run end to end on this tree:
+
+```
+[1/7] proofs-build PASS   5 .v files compiled in 8.0s
+[2/7] no-unproved  PASS   0 unproved steps in 5 .v files
+[3/7] refinement   PASS   2 of 2 recorded digests match
+[4/7] suite        PASS   5081 passed, 0 failed, 14 xfailed, 0 errors
+[5/7] xfail        PASS   2 strict sites covering 14 rows, 0 violations
+[6/7] hostile-5xx  PASS   12 hostile requests, 0 unexpected 5xx
+[7/7] mutation-floor SKIPPED  harness has no --fast mode
+--- 6 PASS, 0 FAIL, 1 SKIPPED ---  result: NOT CERTIFIED  (exit 2)
+```
+
+So the standard is executable now, and **it does not yet certify the tree: the
+mutation score is not measured by the gate.** One thing this wave deliberately
+did not do is reverse the negated-reporting-verb pin, which is the whole of the
+remaining 20% and is a product decision (`REVIEW-scope-interval.md` §5).

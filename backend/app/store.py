@@ -1,16 +1,22 @@
 """Explicit local SQLite initialization and repository helpers."""
 import json
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from .dependency_graph import transitive_dependents
 from .models import Record
 from .mock_provider import SEED_RECORDS
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -45,6 +51,74 @@ class DatabaseUnavailable(RuntimeError):
 
 class StaleRevision(RuntimeError):
     """A challenge was computed from an investigation revision that is no longer current."""
+
+
+@dataclass(frozen=True)
+class UnreadableRow:
+    """A stored row that cannot be read as the schema requires.
+
+    Deliberately excludes the stored value: the point of naming a row is to say
+    where to look, not to copy the bad content into a log or an error body.
+    """
+
+    table: str
+    row_id: str
+    field: str
+    reason: str
+
+
+class CorruptStoredRow(DatabaseUnavailable):
+    """One stored row cannot be decoded, and the read that needed it is refused.
+
+    It subclasses ``DatabaseUnavailable`` on purpose: the local file is the whole
+    trust boundary, an unreadable row is a failure of that store rather than of the
+    request, and the existing HTTP handler already answers it as a bounded 503
+    instead of a 500 with a traceback.
+
+    The message names the table, the row id and the column. That naming is the
+    reason this class exists — a generic decode error made every other row in the
+    table unreadable while saying nothing about which row was bad.
+    """
+
+    def __init__(self, *, table: str, row_id: str, field: str, reason: str):
+        self.row = UnreadableRow(table=table, row_id=str(row_id), field=field, reason=reason)
+        super().__init__(
+            f"Unreadable stored row {self.row.table}:{self.row.row_id} "
+            f"(column {self.row.field}): {self.row.reason}"
+        )
+        # The HTTP body is one fixed sentence, so the row identity has to reach the
+        # operator some other way. Only the coordinates are logged, never the value.
+        logger.warning("Unreadable stored row %s:%s (column %s): %s",
+                       self.row.table, self.row.row_id, self.row.field, self.row.reason)
+
+    @property
+    def table(self) -> str:
+        return self.row.table
+
+    @property
+    def row_id(self) -> str:
+        return self.row.row_id
+
+    @property
+    def field(self) -> str:
+        return self.row.field
+
+    @property
+    def reason(self) -> str:
+        return self.row.reason
+
+
+def _corrupt(table: str, row_id: object, field: str, reason: str) -> CorruptStoredRow:
+    return CorruptStoredRow(table=table, row_id=str(row_id), field=field, reason=reason)
+
+
+def _first_failing_field(error: ValidationError, default: str) -> str:
+    """Name the column a schema failure is about, from the model's own locator."""
+    for item in error.errors():
+        location = item.get("loc") or ()
+        if location and isinstance(location[0], str):
+            return location[0]
+    return default
 
 
 def database_path() -> Path:
@@ -142,9 +216,37 @@ def initialize_database() -> Path:
 
 
 def list_records(*, include_restricted: bool = False) -> list[Record]:
+    """Every readable record, for the callers that need no skip report."""
+    records, _ = list_records_with_report(include_restricted=include_restricted)
+    return records
+
+
+def list_records_with_report(
+    *, include_restricted: bool = False
+) -> tuple[list[Record], tuple[UnreadableRow, ...]]:
+    """Read the corpus, skipping unreadable rows and reporting which were skipped.
+
+    A list read needs many rows and no single one in particular, so one corrupt
+    record must not make the whole corpus unreadable: the readable rows are
+    returned and the skipped ones are named. ``list_records`` is the same read
+    without the report, for callers that only serve the rows.
+
+    Restricted rows are filtered before decoding, so a corrupt restricted row —
+    which no caller could be shown anyway — is not reported to a caller that is
+    not allowed to see it.
+    """
     with connect() as db:
         rows = db.execute("SELECT * FROM records ORDER BY timestamp DESC, id").fetchall()
-    return [Record(id=r["id"], timestamp=r["timestamp"], department=r["department"], text=r["text"], tags=json.loads(r["tags_json"]), restricted=bool(r["restricted"]), source_group=r["source_group"]) for r in rows if include_restricted or not r["restricted"]]
+    records: list[Record] = []
+    skipped: list[UnreadableRow] = []
+    for row in rows:
+        if not include_restricted and row["restricted"]:
+            continue
+        try:
+            records.append(_record_from_row(row))
+        except CorruptStoredRow as error:
+            skipped.append(error.row)
+    return records, tuple(skipped)
 
 
 def get_record(record_id: str) -> Record | None:
@@ -152,7 +254,7 @@ def get_record(record_id: str) -> Record | None:
         row = db.execute("SELECT * FROM records WHERE id=? AND restricted=0", (record_id,)).fetchone()
     if row is None:
         return None
-    return Record(id=row["id"], timestamp=row["timestamp"], department=row["department"], text=row["text"], tags=json.loads(row["tags_json"]), restricted=False, source_group=row["source_group"])
+    return _record_from_row(row)
 
 
 def _wall_clock() -> datetime:
@@ -172,9 +274,26 @@ def _stamp(clock: Callable[[], datetime] | None) -> str:
 
 
 def _record_from_row(row: sqlite3.Row) -> Record:
-    return Record(id=row["id"], timestamp=row["timestamp"], department=row["department"],
-                  text=row["text"], tags=json.loads(row["tags_json"]),
-                  restricted=bool(row["restricted"]), source_group=row["source_group"])
+    """Decode one record row, naming it if it cannot be decoded.
+
+    The column has to stay inspectable, so the tags are decoded before the model is
+    built: a ``tags_json`` that is not a JSON array of strings is reported against
+    that column rather than as an anonymous schema failure.
+    """
+    record_id = row["id"]
+    try:
+        tags = json.loads(row["tags_json"])
+    except (TypeError, ValueError) as exc:
+        raise _corrupt("records", record_id, "tags_json", "not valid JSON") from exc
+    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+        raise _corrupt("records", record_id, "tags_json", "not a JSON array of strings")
+    try:
+        return Record(id=record_id, timestamp=row["timestamp"], department=row["department"],
+                      text=row["text"], tags=tags,
+                      restricted=bool(row["restricted"]), source_group=row["source_group"])
+    except ValidationError as exc:
+        raise _corrupt("records", record_id, _first_failing_field(exc, "timestamp"),
+                       "value does not match the record schema") from exc
 
 
 def create_record(
@@ -238,17 +357,43 @@ def _save_claim(db: sqlite3.Connection, investigation_id: str, claim: dict) -> N
     db.execute("INSERT INTO claim_versions VALUES(?,?,?,?,?,?)", (investigation_id, claim["id"], claim["version"], claim["hypothesis_id"], json.dumps(claim), json.dumps(claim["dependencies"])))
 
 
-def get_investigation(investigation_id: str) -> dict | None:
-    with connect() as db:
-        investigation = db.execute("SELECT * FROM investigations WHERE id=?", (investigation_id,)).fetchone()
-        if investigation is None:
-            return None
-        rows = db.execute("""SELECT cv.claim_json FROM claim_versions cv
-            JOIN (SELECT claim_id,MAX(version) version FROM claim_versions
-                 WHERE investigation_id=? GROUP BY claim_id) latest
-            ON cv.claim_id=latest.claim_id AND cv.version=latest.version
-            WHERE cv.investigation_id=? ORDER BY cv.claim_id""", (investigation_id, investigation_id)).fetchall()
-    return {"id": investigation["id"], "question": investigation["question"], "created_at": investigation["created_at"], "version": investigation["version"], "claims": [json.loads(row["claim_json"]) for row in rows]}
+def _decode_claim(claim_id: str, raw: object) -> dict:
+    """Decode one stored claim, or name the row that cannot be decoded.
+
+    The contract checked here is this table's, not the HTTP response schema's: a
+    stored claim must be a JSON object whose ``id`` matches its row key and which
+    carries the fields every reader in this module dereferences — ``version``,
+    ``hypothesis_id`` and ``dependencies``. Checking the row's own contract is what
+    keeps a hand-written store caller (and the store's own tests, which persist
+    minimal claims) working, while still turning a truncated or overwritten row
+    into a named failure instead of an exception deep inside a comprehension.
+
+    The stored dictionary is returned unchanged: a read never rewrites what was
+    written.
+    """
+    try:
+        value = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+    except (TypeError, ValueError) as exc:
+        raise _corrupt("claim_versions", claim_id, "claim_json", "not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise _corrupt("claim_versions", claim_id, "claim_json", "not a JSON object")
+    if value.get("id") != claim_id:
+        raise _corrupt("claim_versions", claim_id, "claim_json",
+                       "stored claim id does not match its row key")
+    missing = [name for name in ("version", "hypothesis_id", "dependencies")
+               if name not in value]
+    if missing:
+        raise _corrupt("claim_versions", claim_id, "claim_json",
+                       f"claim JSON is missing required fields: {', '.join(missing)}")
+    if not isinstance(value["version"], int) or isinstance(value["version"], bool):
+        raise _corrupt("claim_versions", claim_id, "claim_json", "version is not an integer")
+    if not isinstance(value["hypothesis_id"], str) or not value["hypothesis_id"]:
+        raise _corrupt("claim_versions", claim_id, "claim_json", "hypothesis_id is not a string")
+    dependencies = value["dependencies"]
+    if not isinstance(dependencies, list) or not all(isinstance(item, str) for item in dependencies):
+        raise _corrupt("claim_versions", claim_id, "claim_json",
+                       "dependencies is not a JSON array of record ids")
+    return value
 
 
 def _latest_claims(db: sqlite3.Connection, investigation_id: str) -> dict[str, dict]:
@@ -256,7 +401,38 @@ def _latest_claims(db: sqlite3.Connection, investigation_id: str) -> dict[str, d
         (SELECT claim_id,MAX(version) version FROM claim_versions WHERE investigation_id=? GROUP BY claim_id) latest
         ON cv.claim_id=latest.claim_id AND cv.version=latest.version WHERE cv.investigation_id=?""",
         (investigation_id, investigation_id)).fetchall()
-    return {row["claim_id"]: json.loads(row["claim_json"]) for row in rows}
+    return {row["claim_id"]: _decode_claim(row["claim_id"], row["claim_json"]) for row in rows}
+
+
+def _validated_investigation(investigation: sqlite3.Row) -> dict:
+    """Decode one investigation row, naming it on the column that fails."""
+    investigation_id = investigation["id"]
+    try:
+        datetime.fromisoformat(investigation["created_at"])
+    except (TypeError, ValueError) as exc:
+        raise _corrupt("investigations", investigation_id, "created_at",
+                       "not an ISO-8601 instant") from exc
+    try:
+        version = int(investigation["version"])
+    except (TypeError, ValueError) as exc:
+        raise _corrupt("investigations", investigation_id, "version",
+                       "not an integer revision") from exc
+    return {"id": investigation_id, "question": investigation["question"],
+            "created_at": investigation["created_at"], "version": version}
+
+
+def get_investigation(investigation_id: str) -> dict | None:
+    with connect() as db:
+        investigation = db.execute("SELECT * FROM investigations WHERE id=?", (investigation_id,)).fetchone()
+        if investigation is None:
+            return None
+        decoded = _validated_investigation(investigation)
+        rows = db.execute("""SELECT cv.claim_id, cv.claim_json FROM claim_versions cv
+            JOIN (SELECT claim_id,MAX(version) version FROM claim_versions
+                 WHERE investigation_id=? GROUP BY claim_id) latest
+            ON cv.claim_id=latest.claim_id AND cv.version=latest.version
+            WHERE cv.investigation_id=? ORDER BY cv.claim_id""", (investigation_id, investigation_id)).fetchall()
+    return dict(decoded, claims=[_decode_claim(row["claim_id"], row["claim_json"]) for row in rows])
 
 
 def get_challenge_snapshot(investigation_id: str, claim_id: str, record_id: str) -> dict | None:
@@ -333,8 +509,18 @@ def get_history(investigation_id: str) -> list[dict] | None:
     with connect() as db:
         if db.execute("SELECT 1 FROM investigations WHERE id=?", (investigation_id,)).fetchone() is None:
             return None
-        rows = db.execute("SELECT event_json FROM history WHERE investigation_id=? ORDER BY version", (investigation_id,)).fetchall()
-    return [json.loads(row["event_json"]) for row in rows]
+        rows = db.execute("SELECT version, event_json FROM history WHERE investigation_id=? ORDER BY version", (investigation_id,)).fetchall()
+    events: list[dict] = []
+    for row in rows:
+        row_id = f"{investigation_id}@{row['version']}"
+        try:
+            event = json.loads(row["event_json"])
+        except (TypeError, ValueError) as exc:
+            raise _corrupt("history", row_id, "event_json", "not valid JSON") from exc
+        if not isinstance(event, dict):
+            raise _corrupt("history", row_id, "event_json", "not a JSON object")
+        events.append(event)
+    return events
 
 
 if __name__ == "__main__":
