@@ -597,7 +597,7 @@ def test_all_three_classes_have_denominators_on_both_splits():
 HEDGE_NEIGHBOURS = [
     ("The team could not review every open item before the deadline.", TP, SUPPORTS),
     ("The shift had enough time to review every open item.", TP, CONTRADICTS),
-    ("No one could confirm that the checklist was unavailable.", CU, SUPPORTS),
+    ("The auditor confirmed that the checklist was unavailable.", CU, SUPPORTS),
     ("Perhaps the ward was busy, and the checklist was unavailable.", CU, SUPPORTS),
     ("The checklist was unavailable, though perhaps the binder was at the desk.",
      CU, SUPPORTS),

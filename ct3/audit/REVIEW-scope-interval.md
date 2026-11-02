@@ -106,10 +106,15 @@ dropped — the defect §2 names. The dev split did not move because it contains
 row of that shape, which is why the altered readings first surfaced as two
 failing pins rather than as an accuracy change.
 
-## 5. The remaining 20%, named precisely
+## 5. The remaining error class, named precisely
 
-The falsification corpus is unchanged at **1 915 of 9 576 commits wrong by
-construction (20.0%)**, and every one of those is the same class:
+*Updated 2026-11-02 by the attribution wave: the evidential half of this class is
+closed, and the numbers below are now **943 of 8 604 commits (11.0%)**, all of it
+a denied **speech act**. The paragraph is kept in its original form because the
+reasoning still describes the policy; see `ATTRIBUTION.md` for what changed.*
+
+The falsification corpus was **1 915 of 9 576 commits wrong by construction
+(20.0%)**, and every one of those was the same class:
 
 ```
 "No one confirmed that the checklist was unavailable."  ->  SUPPORTS

@@ -236,3 +236,22 @@ So the standard is executable now, and **it does not yet certify the tree: the
 mutation score is not measured by the gate.** One thing this wave deliberately
 did not do is reverse the negated-reporting-verb pin, which is the whole of the
 remaining 20% and is a product decision (`REVIEW-scope-interval.md` §5).
+
+## After the attribution wave
+
+2026-11-02, same branch. One rule, one proof file, one new type.
+
+| | value | artifact |
+|---|---|---|
+| suite | **5 127 passed, 14 xfailed, 0 failed** | gate check 4 |
+| falsification corpus | **943 of 8 604 commits wrong (11.0%)**, was 1 915 of 9 576 (20.0%) | `test_stance_algebra_falsification.py` |
+| remaining class | one construction: a denied speech act (`None of the staff reported that …`) | same, `per_operator_wrong` |
+| recall / misses / flips | 100% / 0 / 0, unchanged | same |
+| dev / old holdout / new holdout | 57/64 / 34/41 / 54/65, **unchanged** | `SEMANTIC-BENCHMARK.md`, `SEMANTIC-HOLDOUT-V2.md` |
+| proof | `ct3/Attribution.v`, 23 theorems, 6 `Print Assumptions` closed | `coqc` |
+| typed frame | `Attribution(agent, quantifier, polarity, verb_class)` → `Force`, meet composition | `app/evidence_frames.py` |
+
+The labelled sets did not move, and that is the honest result: the construction
+this rule fixes does not appear in the dev or holdout splits. The improvement is
+real and it is confined to the adversarial corpus — 9 points of commit error, not
+9 points of accuracy.

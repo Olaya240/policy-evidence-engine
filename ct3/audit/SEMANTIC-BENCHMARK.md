@@ -313,3 +313,22 @@ that set.
 
 Independence is qualified in the v2 artifact: reading the older benchmark's structure exposed
 five of its tags before the new rows were written. Thirteen of eighteen tags are clean.
+
+## Attributed denial (2026-11-02)
+
+A matrix clause that denies an *evidential* act withholds its complement, so the
+guard abstains with `ATTRIBUTED_DENIAL`:
+
+```
+"No one could confirm that the checklist was unavailable."     -> abstain (was SUPPORTS)
+"The auditor did not confirm that the checklist was unavailable." -> abstain (unchanged)
+"None of the staff reported that the checklist was unavailable."  -> SUPPORTS (pinned policy)
+```
+
+This split one row out of `HEDGE_NEIGHBOURS` — it was listed there as a neighbour
+that must not abstain, and it was the defect — and replaced it with
+`"The auditor confirmed that the checklist was unavailable."`, which is what an
+affirmative frame looks like. The dev and holdout splits are unchanged at 57/64
+and 34/41 because neither contains this construction; the falsification corpus
+moves from 1 915 / 9 576 wrong (20.0%) to **943 / 8 604 (11.0%)**, all of the
+remainder being denied speech acts.

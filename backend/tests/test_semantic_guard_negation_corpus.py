@@ -10,6 +10,10 @@ Every row below asserts both the exact relation and the exact reason code:
 
 * ``NEGATED`` rows are true negations of the matched cue. The guard must abstain
   with ``NEGATED_CUE``; certifying either direction inverts the sentence.
+* ``WITHHELD`` rows deny that the proposition was *established* (a quantifier or a
+  negation over an evidential verb). The complement is not asserted, so the guard
+  abstains with ``ATTRIBUTED_DENIAL``; the same shape over a speech-act verb
+  belongs to ``CERTIFIES`` and is pinned there.
 * ``CERTIFIES`` rows contain a negation token that does *not* negate the cue
   (contrast, matrix-clause negation with the cue in the complement, a quoted
   "No", a negation inside a NEUTRAL cue's own wording, negation of a different
@@ -86,8 +90,13 @@ CORPUS = [
      "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
     ("CU-WEATHER-WHEN", "It was not raining when the binder was missing.",
      "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+    # REVERSED 2026-11-02. This row pinned a denied *evidential* verb as certifying
+    # the complement, which is the reading that certified "No one confirmed that …"
+    # and accounted for a fifth of the falsification corpus. Denying that something
+    # was established denies the establishment, so the complement is withheld;
+    # denying a *speech act* still certifies, and those rows below are unchanged.
     ("CU-MATRIX-CONFIRM", "No one could confirm that the checklist was unavailable.",
-     "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
     ("CU-MATRIX-SUPERVISOR", "No supervisor said the binder was missing.",
      "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
     ("CU-QUOTED-NO", "'No,' the auditor said, 'the binder was missing.'",

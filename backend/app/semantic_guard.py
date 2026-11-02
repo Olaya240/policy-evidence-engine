@@ -13,6 +13,7 @@ import re
 
 from .models import Stance
 from .scope_layer import SentenceScope, build_scope
+from .evidence_frames import Force, force_of_prefix
 from .stance_algebra import (
     Clause,
     Modality,
@@ -342,6 +343,14 @@ def _modality(quote: str, start: int, final_clause: str, end: int | None = None,
         return Modality.CONDITIONAL
     if _is_evidence_aboutness_frame(final_clause):
         return Modality.EVIDENTIAL_FRAME
+    # A matrix clause that denies an *establishing* act withholds its complement:
+    # "No one confirmed that the checklist was unavailable" is a statement about
+    # the evidence base. The rule lives in ``evidence_frames`` as a typed frame
+    # rather than as a regex here, because the regex it replaced could only see
+    # ``not``/``never`` and missed ``no one`` — one construction, two verdicts,
+    # decided by which word did the negating.
+    if force_of_prefix(_cue_prefix_clause(quote, start)) is Force.WITHHOLDS:
+        return Modality.ATTRIBUTED_DENIAL
     if _is_hedged(final_clause):
         return Modality.HEDGED
     if scope is not None and scope.hedge_scope_at(start):

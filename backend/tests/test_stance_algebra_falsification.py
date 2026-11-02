@@ -413,9 +413,10 @@ def test_abstain_info_is_a_composition_identity_on_real_verdicts() -> None:
             violations += 1
             if first is None:
                 first = (sentence, element)
-    # 9 576 after the postposed-hedge reader landed (was 10 530 before it); the bound
-    # only guards against a corpus that stopped producing claims to check against.
-    assert committed > 9000, f"only {committed} committed verdicts to check against"
+    # 8 604 after the attributed-denial rule landed (9 576 before it, 10 530 before
+    # the postposed-hedge reader); the bound only guards against a corpus that stopped
+    # producing claims to check against.
+    assert committed > 8000, f"only {committed} committed verdicts to check against"
     assert violations == 0, f"{violations} of {committed} changed; first={first}"
 
 
@@ -429,11 +430,12 @@ def test_measured_commit_rate_and_wrong_commits() -> None:
 
     Re-measured after the postposed-hedge reader landed: 9 576 / 20 000 committed
     (47.9%), of which 1 915 (20.0%) are wrong by construction; 0 misses and 0 flips
-    on the 7 661 sentences that really do assert the cue. The earlier figures were
-    10 530 (52.6%) and 2 869 (27.2%); the HEDGE family went to zero, which is why the
-    bounds below moved. Always-abstain still scores 0 wrong and 0 recall on the same
-    set. These are regression guards, not claims of adequacy: they hold at the
-    measured values and fail if the guard gets worse.
+    on the 7 661 sentences that really do assert the cue. The figures have moved twice:
+    10 530 / 2 869 (27.2%) before the postposed-hedge reader, 9 576 / 1 915 (20.0%)
+    after it, and **8 604 / 943 (11.0%)** after the attributed-denial rule, which
+    withholds a complement under a denied evidential verb. The bounds below moved down
+    with each fix; they are regression guards, not claims of adequacy, and they fail if
+    the guard gets worse.
     """
     score = _score()
     n = score["n"]
@@ -447,14 +449,14 @@ def test_measured_commit_rate_and_wrong_commits() -> None:
         f"{score['flips']} asserted sentences got the opposite direction; "
         f"per_operator_flip={dict(score['per_operator_flip'])}"
     )
-    assert 9000 <= score["commits"] <= 12000, f"committed {score['commits']}/{n}"
-    assert score["wrong_commits"] <= 2100, (
+    assert 8400 <= score["commits"] <= 12000, f"committed {score['commits']}/{n}"
+    assert score["wrong_commits"] <= 1000, (
         f"{score['wrong_commits']}/{score['commits']} commits are wrong by "
         f"construction; per_operator_wrong={dict(score['per_operator_wrong'])}"
     )
 
 
-def test_wrong_commits_are_confined_to_two_operator_classes() -> None:
+def test_wrong_commits_are_confined_to_one_operator_class() -> None:
     """The errors are one family, not noise: scope read at the wrong level.
 
     When this file was written every wrong commit landed in HEDGE (a postposed

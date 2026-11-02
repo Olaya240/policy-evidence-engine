@@ -139,9 +139,31 @@ def test_the_evidential_rule_does_not_swallow_reported_speech():
     assert detail["reason_code"] is None, detail
 
 
-def test_the_evidential_rule_does_not_swallow_a_quantified_denial():
-    """Neighbour: ``No one could confirm that ...`` keeps certifying (corpus)."""
+def test_a_quantified_denial_of_an_evidential_verb_withholds():
+    """REVERSED 2026-11-02: this row used to keep certifying (``CU-MATRIX-CONFIRM``).
+
+    "No one could confirm that the checklist was unavailable" reports the absence
+    of confirmation, not the checklist's condition. The rule reads the quantifier
+    as the negator, so the same construction no longer has two verdicts depending
+    on whether ``no one`` or ``not`` did the negating.
+    """
     sentence = "No one could confirm that the checklist was unavailable."
+    detail = reviewed_relation_details(sentence, HYPOTHESIS)
+    assert detail["relation"] is None, detail
+    assert detail["reason_code"] == "ATTRIBUTED_DENIAL", detail
+
+
+def test_the_quantified_denial_rule_does_not_swallow_an_affirmative_frame():
+    """Neighbour: the attribution is affirmative, so the complement still asserts."""
+    sentence = "The auditor confirmed that the checklist was unavailable."
+    detail = reviewed_relation_details(sentence, HYPOTHESIS)
+    assert detail["relation"] == Stance.SUPPORTS, detail
+    assert detail["reason_code"] is None, detail
+
+
+def test_the_quantified_denial_rule_does_not_swallow_a_denied_speech_act():
+    """Neighbour: ``no one said`` denies the saying, which is the pinned policy."""
+    sentence = "No one said that the checklist was unavailable."
     detail = reviewed_relation_details(sentence, HYPOTHESIS)
     assert detail["relation"] == Stance.SUPPORTS, detail
     assert detail["reason_code"] is None, detail

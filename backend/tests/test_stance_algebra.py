@@ -357,16 +357,14 @@ def test_results_are_frozen_and_composition_does_not_mutate_its_inputs():
 
 # --- 9. the shipped guard goes through the algebra ------------------------
 
+# Derived, not listed. A hand-maintained mirror drifts: the attributed-denial reason
+# was added to the algebra and this set did not know about it, which is exactly the
+# failure mode the test exists to catch — one level too late. Reading the module's own
+# SCREAMING_CASE string constants makes a new reason visible here by construction.
 _ALGEBRA_REASON_CODES = {
-    NO_CUE_MATCH,
-    CUE_IN_QUESTION,
-    CONDITIONAL_CUE,
-    NEGATED_CUE,
-    EVIDENCE_ABOUTNESS_FRAME,
-    HEDGED_CUE,
-    CONTRAST_CHANGED_CURRENT_STATE,
-    ALL_MATCHED_CUES_REJECTED,
-    AMBIGUOUS_CUE_RELATIONS,
+    value
+    for name, value in vars(algebra).items()
+    if name.isupper() and isinstance(value, str) and value.isupper()
 }
 
 

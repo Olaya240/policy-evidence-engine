@@ -216,6 +216,12 @@ class Modality(Enum):
     INTERROGATIVE = "interrogative"
     CONDITIONAL = "conditional"
     EVIDENTIAL_FRAME = "evidential_frame"
+    #: A matrix clause denies that the proposition was established
+    #: ("No one confirmed that …"). Distinct from ``EVIDENTIAL_FRAME``, which is
+    #: about the evidence base ("no evidence that …"): one denies an act, the
+    #: other reports an absence, and a trace that cannot tell them apart is not
+    #: worth reading.
+    ATTRIBUTED_DENIAL = "attributed_denial"
 
 
 class NegationScope(Enum):
@@ -245,6 +251,10 @@ CUE_IN_QUESTION = "CUE_IN_QUESTION"
 CONDITIONAL_CUE = "CONDITIONAL_CUE"
 NEGATED_CUE = "NEGATED_CUE"
 EVIDENCE_ABOUTNESS_FRAME = "EVIDENCE_ABOUTNESS_FRAME"
+#: A denied evidential frame. The complement is not asserted, so the clause
+#: withholds — the rule that closed the quantifier class in the falsification
+#: corpus, and the reason ``CU-MATRIX-CONFIRM`` was reversed from CERTIFIES.
+ATTRIBUTED_DENIAL = "ATTRIBUTED_DENIAL"
 HEDGED_CUE = "HEDGED_CUE"
 CONTRAST_CHANGED_CURRENT_STATE = "CONTRAST_CHANGED_CURRENT_STATE"
 ALL_MATCHED_CUES_REJECTED = "ALL_MATCHED_CUES_REJECTED"
@@ -293,6 +303,8 @@ class Clause:
             return NEGATED_CUE
         if self.modality is Modality.EVIDENTIAL_FRAME:
             return EVIDENCE_ABOUTNESS_FRAME
+        if self.modality is Modality.ATTRIBUTED_DENIAL:
+            return ATTRIBUTED_DENIAL
         if self.modality is Modality.HEDGED:
             return HEDGED_CUE
         if self.superseded:
