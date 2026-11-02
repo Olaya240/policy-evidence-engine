@@ -112,23 +112,60 @@ def test_transport_loggers_do_not_propagate():
     assert logging.getLogger("httpcore").propagate is False
 
 
-def test_child_logger_record_never_reaches_a_root_handler(caplog):
+class _RootCollector(logging.Handler):
+    """A handler installed on the root logger, i.e. what a deployment has.
+
+    `caplog` is not a substitute: pytest's logging plugin attaches its own
+    handlers per logger, so it also captures records that do not propagate and
+    cannot distinguish "nothing leaked" from "pytest caught everything".
+    Measured under pytest 9.2.0: with `httpcore.propagate = False` a root handler
+    sees 0 records while `caplog` sees 1. These two tests therefore observe the
+    root logger directly, which is the property they name.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+class _RootCollectorFixture:
+    def __init__(self) -> None:
+        self.collector = _RootCollector()
+
+    def __enter__(self) -> _RootCollector:
+        root = logging.getLogger()
+        previous = root.level
+        root.addHandler(self.collector)
+        root.setLevel(logging.DEBUG)
+        self._previous = previous
+        return self.collector
+
+    def __exit__(self, *exc: object) -> None:
+        root = logging.getLogger()
+        root.removeHandler(self.collector)
+        root.setLevel(self._previous)
+
+
+def test_child_logger_record_never_reaches_a_root_handler():
     """A filter on `httpcore` could never see a record created on
     `httpcore.connection`; stopping propagation is what closes it."""
-    caplog.set_level(logging.DEBUG)
-    logging.getLogger("httpcore.connection").warning(
-        "authorization: Bearer %s", FAKE_TOKEN
-    )
-    logging.getLogger("httpcore.http11").warning("header %s", FAKE_TOKEN)
-    logging.getLogger("httpx").warning("header %s", FAKE_TOKEN)
-    assert caplog.records == []
-    assert FAKE_TOKEN not in caplog.text
+    with _RootCollectorFixture() as root:
+        logging.getLogger("httpcore.connection").warning(
+            "authorization: Bearer %s", FAKE_TOKEN
+        )
+        logging.getLogger("httpcore.http11").warning("header %s", FAKE_TOKEN)
+        logging.getLogger("httpx").warning("header %s", FAKE_TOKEN)
+    assert [r.name for r in root.records] == []
+    assert FAKE_TOKEN not in "".join(r.getMessage() for r in root.records)
 
 
-def test_root_handler_sees_no_transport_record_even_at_debug(caplog):
-    caplog.set_level(logging.DEBUG)
-    for name in ("httpx", "httpcore", "httpcore.connection", "httpcore.http11",
-                 "httpcore.http2", "httpcore.proxy"):
-        logging.getLogger(name).debug("x")
-        logging.getLogger(name).error("authorization: Bearer %s", FAKE_TOKEN)
-    assert [r for r in caplog.records if r.name.startswith(("httpx", "httpcore"))] == []
+def test_root_handler_sees_no_transport_record_even_at_debug():
+    with _RootCollectorFixture() as root:
+        for name in ("httpx", "httpcore", "httpcore.connection", "httpcore.http11",
+                     "httpcore.http2", "httpcore.proxy"):
+            logging.getLogger(name).debug("x")
+            logging.getLogger(name).error("authorization: Bearer %s", FAKE_TOKEN)
+    assert [r.name for r in root.records] == []
