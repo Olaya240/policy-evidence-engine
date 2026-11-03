@@ -88,6 +88,13 @@ _INVERSION_AFTER = re.compile(
     r"(?P<aux>had|were|should)\b",
     re.IGNORECASE,
 )
+#: The participles of ``be``. A bare noun read starts here too, and "been" is a
+#: bare-but-verbal form: "had been reported to the supervisor" is a perfect
+#: chain whose real subject precedes the auxiliary, whereas an inversion puts
+#: the subject right after it ("had the binder been reported"). Without this
+#: guard, a coordinated past perfect ("P and had been reported …") is misread
+#: as a conditional on the second conjunct.
+_PERFECT_BE = frozenset({"been", "being"})
 #: Words that cannot open a predicate. When the word after the auxiliary and its
 #: subject is one of these, the clause is not read as an inversion: "Were the
 #: checklist and the binder …" has a coordinated subject, not a predicate.
@@ -310,6 +317,8 @@ def _inversion_opens(window):
     if first in _PRONOUNS:
         return _clean(words[1]) not in _INVERSION_NON_PREDICATE
     if first in _NON_REFERENTIAL or first in _INVERSION_NON_PREDICATE:
+        return False
+    if first in _PERFECT_BE:
         return False
     return _clean(words[1]) not in _INVERSION_NON_PREDICATE
 

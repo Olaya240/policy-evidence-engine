@@ -711,11 +711,12 @@ def test_dev_accuracy_floor():
 
 
 def test_holdout_accuracy_floor():
-    """Regression floor: 37/41 = 0.902, up from 31/41 = 0.756 as committed.
+    """Regression floor: 38/41 = 0.927 measured 2026-11-03 (was 31/41 as committed).
 
     The denied-report rule moved rept-h1 and rept-h2 from a certified direction
-    to ABSTAIN. The residual four are the two temporal-change rows, hedge-h3 and
-    bound-h2; the holdout half is still not re-labelled or tuned.
+    to ABSTAIN, and the hedge-phrase rule later took hedge-h3 green. The residual
+    three are the two temporal-change rows and bound-h2; the holdout half is
+    still not re-labelled or tuned.
     """
     measured = score(rows_for(HOLDOUT))
     assert measured["accuracy"] >= 0.90, format_report((HOLDOUT,))

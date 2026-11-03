@@ -15,20 +15,24 @@
 
      Frame = (class, polarity, quantifier)
      effective_negation = polarity is negative, or the quantifier is "none"
-     force f = Withholds   when the class is evidential and the frame is negative
+     force f = Withholds   when the frame is effectively negated
               = Asserts     otherwise
+
+   The class is on the frame record but plays no part in the rule: a denied
+   speech act withholds exactly as a denied evidential does.  (Until 2026-11-02
+   this file modelled a narrower rule that withheld only the evidential class
+   and let a denied speech act certify; the shipped reader never made that
+   split, so the model now states the rule the code actually computes. The old
+   split is preserved in git history, not here.)
 
    and composition is the meet of the forces of a prefix, with ``Asserts`` as the
    identity.  The two-element carrier is ordered ``Withholds <= Asserts``: less
    information is the bottom.  Everything below is proved about that algebra.
 
-   What is *not* proved, and must not be read into it: that the evidential class
-   is the right class to withhold on.  That split — deny an establishing act,
-   keep a denied speech act certifying — is a product policy, chosen because
-   "nobody reported X" is an absence of evidence while "nobody confirmed X" at
-   least denies the confirmation.  The file proves the algebra is sound; the
-   policy lives in ``evidence_frames.py`` and in the corpus, and the falsification
-   corpus still counts the rows the policy gets wrong. *)
+   What is *not* proved, and must not be read into it: which English shapes get
+   a frame at all.  The file proves the algebra over the typed frames is sound;
+   the recognition lives in ``evidence_frames.py`` and in the corpus, and the
+   falsification corpus still counts the rows the policy gets wrong. *)
 
 Require Import List.
 Import ListNotations.
@@ -64,10 +68,7 @@ Definition effective_negation (f : Frame) : bool :=
   end.
 
 Definition force (f : Frame) : Force :=
-  match cls f, effective_negation f with
-  | Evidential, true => Withholds
-  | _, _ => Asserts
-  end.
+  if effective_negation f then Withholds else Asserts.
 
 (* Information order: ``Withholds`` is the bottom. *)
 Definition le_force (x y : Force) : Prop :=
@@ -89,33 +90,39 @@ Definition meet (x y : Force) : Force :=
 
 Theorem force_withholds_iff :
   forall f : Frame,
-    force f = Withholds <-> cls f = Evidential /\ effective_negation f = true.
+    force f = Withholds <-> effective_negation f = true.
 Proof.
-  intros f. destruct f as [c p q]. destruct c, p, q; simpl; intuition discriminate.
+  intros [c p q]. destruct p, q; simpl; intuition discriminate.
 Qed.
 
 Theorem force_asserts_iff :
   forall f : Frame,
-    force f = Asserts <->
-    cls f = SpeechAct \/ effective_negation f = false.
+    force f = Asserts <-> effective_negation f = false.
 Proof.
-  intros f. destruct f as [c p q]. destruct c, p, q; simpl; intuition discriminate.
+  intros [c p q]. destruct p, q; simpl; intuition discriminate.
 Qed.
 
-(* The point of the type: the force is a function of two fields, so two frames that
-   agree on the class and on the effective negation have the same force, whatever
-   the agent says or however the quantifier is spelled. *)
+(* The class is inert: two frames that differ only in class have the same force.
+   This is what the shipped reader implements for denied speech acts. *)
+Theorem class_is_inert :
+  forall p : Polarity, forall u : Quantifier,
+    force {| cls := Evidential; pol := p; quant := u |} =
+    force {| cls := SpeechAct;  pol := p; quant := u |}.
+Proof. intros p u. reflexivity. Qed.
+
+(* The point of the type: the force is a function of one field, so two frames
+   that agree on the effective negation have the same force, whatever the agent
+   says or however the quantifier is spelled. *)
 Theorem force_extensional :
   forall f g : Frame,
-    cls f = cls g ->
     effective_negation f = effective_negation g ->
     force f = force g.
 Proof.
-  intros f g Hc Hn. unfold force. rewrite Hc, Hn. reflexivity.
+  intros f g Hn. unfold force. rewrite Hn. reflexivity.
 Qed.
 
 (* Quantifier and polarity are two spellings of one thing: negating either way
-   reaches ``Withholds`` on the evidential class. *)
+   reaches ``Withholds``, on any class. *)
 Theorem quantifier_and_polarity_agree :
   forall c : Class,
     force {| cls := c; pol := Negative; quant := All |} =
@@ -249,9 +256,20 @@ Proof. reflexivity. Qed.
 Theorem an_asserting_frame_exists : force affirmative_evidential = Asserts.
 Proof. reflexivity. Qed.
 
+(* The shipped policy, stated on the two classes: a denied speech act withholds
+   exactly as a denied evidential does, and an affirmative frame of either kind
+   certifies. Both outcomes stay reachable, so the rule can matter. *)
+Theorem denied_speech_act_withholds : force denied_speech_act = Withholds.
+Proof. reflexivity. Qed.
+
 Theorem the_policy_split_is_reachable :
-  force denied_evidential = Withholds /\ force denied_speech_act = Asserts.
+  force denied_speech_act = Withholds /\ force affirmative_evidential = Asserts.
 Proof. split; reflexivity. Qed.
+
+(* The two classes do not diverge: the old class split is unreachable. *)
+Theorem the_class_split_is_unreachable :
+  force denied_evidential = force denied_speech_act.
+Proof. reflexivity. Qed.
 
 Theorem a_prefix_can_change_its_mind :
   compose [affirmative_evidential] = Asserts /\

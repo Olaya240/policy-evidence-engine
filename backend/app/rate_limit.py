@@ -164,11 +164,6 @@ class TokenBucketRateLimiter:
             return RateLimitDecision(allowed=False,
                                      retry_after=(1.0 - bucket.tokens) / self._rate)
 
-    def reset(self) -> None:
-        """Forget every bucket. For test setup, not for production use."""
-        with self._lock:
-            self._buckets.clear()
-
     def _tokens_at(self, bucket: _Bucket, now: float) -> float:
         elapsed = now - bucket.seen
         if elapsed <= 0:  # a clock that moves backwards never removes tokens

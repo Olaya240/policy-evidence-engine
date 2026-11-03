@@ -323,7 +323,11 @@ def check_refinement_freshness(_fast: bool) -> Result:
             *rows,
             f"    regenerate: {_REGENERATE}",
         )
-    return ok("2 of 2 recorded digests match and the table rebuilds byte-identically", *rows)
+    return ok(
+        f"{len(recorded)} of {len(recorded)} recorded digests match"
+        " and the table rebuilds byte-identically",
+        *rows,
+    )
 
 
 def _regenerate_table() -> tuple[bool, str]:

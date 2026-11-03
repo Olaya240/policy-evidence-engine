@@ -130,6 +130,9 @@ EVIDENTIAL_VERBS = frozenset({
     "record", "records", "recorded", "recording",
     "demonstrate", "demonstrates", "demonstrated", "demonstrating",
     "substantiate", "substantiates", "substantiated",
+    "find", "finds", "found", "finding",
+    "show", "shows", "showed", "shown", "showing",
+    "locate", "locates", "located", "locating",
     # Cognition verbs: "I do not think the checklist was unavailable" reports the
     # speaker's knowledge state exactly as "did not confirm" reports an
     # establishing act. Negated, neither asserts the complement. They were the
@@ -178,11 +181,38 @@ _NONE_QUANTIFIER = re.compile(
 #: A bare ``no`` determiner as the subject of the reporting verb that follows:
 #: ``"No supervisor said …"`` negates the subject in the same way ``"No one
 #: said …"`` does, and the quantifier list above only spells the pronoun form.
-#: Anchored to the end of the verb's clause on purpose — in ``"There was no doubt
+#: The head may carry up to two modifiers (``"No staff member said …"``), but a
+#: function word inside the chain cancels the match — in ``"There was no doubt
 #: that the auditor documented …"`` the ``no`` is not the subject of the verb, and
-#: that sentence asserts.
-_NO_DETERMINER_SUBJECT = re.compile(
-    r"\bno\s+[A-Za-z][A-Za-z'’\-]*\s*$", re.IGNORECASE)
+#: that sentence asserts. Anchored to the end of the verb's clause on purpose.
+_NO_SUBJECT_CHAIN = re.compile(
+    r"\bno\s+((?:[A-Za-z][A-Za-z'’\-]*\s+){0,2}[A-Za-z][A-Za-z'’\-]*)\s*$",
+    re.IGNORECASE,
+)
+
+#: Words that cannot sit between ``no`` and its head in a subject phrase. Anything
+#: else (a two-word noun phrase is fine) keeps the match; one of these ends it.
+_NO_SUBJECT_STOP = frozenset({
+    "that", "whether", "if", "the", "a", "an", "it", "there", "this",
+    "these", "those", "was", "were", "is", "are", "has", "have", "had",
+    "did", "do", "does", "not", "never", "and", "but", "or", "of", "to",
+    "in", "on", "at", "for", "with", "without", "as",
+})
+
+
+def _no_subject_match(window: str):
+    """The ``no <head[, modifier]?>`` match immediately before the verb, or ``None``."""
+    match = _NO_SUBJECT_CHAIN.search(window)
+    if match is None:
+        return None
+    if any(word.casefold() in _NO_SUBJECT_STOP
+           for word in match.group(1).split()):
+        return None
+    return match
+
+
+def _no_determiner_subject(window: str) -> bool:
+    return _no_subject_match(window) is not None
 
 _SOME_QUANTIFIER = re.compile(
     r"\b(?:some|several|a\s+few|many|most|a\s+number\s+of)\b",
@@ -279,7 +309,9 @@ def _subject_before(text: str, end: int) -> str:
     if comma != -1:
         window = window[comma + 1:]
     window = _NONE_QUANTIFIER.sub(" ", window)
-    window = _NO_DETERMINER_SUBJECT.sub(" ", window)
+    subject = _no_subject_match(window)
+    if subject is not None:
+        window = window[:subject.start()] + " " + window[subject.end():]
     window = _SOME_QUANTIFIER.sub(" ", window)
     return " ".join(window.split())
 
@@ -307,12 +339,21 @@ def frames(prefix: str) -> tuple[Attribution, ...]:
         # Scope, not prefix. The negation and the quantifier are read in the
         # verb's own clause, so a denial in a previous sentence cannot reach it.
         before = _clause_of(prefix, match.start())
-        negated = _NEGATION.search(before) is not None
-        none_subject = (_NONE_QUANTIFIER.search(before) is not None
-                        or _NO_DETERMINER_SUBJECT.search(before) is not None)
-        if none_subject:
-            negated = True
-        quantifier = QUANTIFIER_NONE if none_subject else (
+        quantified = (_NONE_QUANTIFIER.search(before) is not None
+                      or _no_determiner_subject(before))
+        # A fronted adverbial ("Without the key, the auditor confirmed …") does
+        # not deny the reporting act, so text before the clause's last comma is
+        # outside the negation's scope unless it carries the negating subject
+        # itself ("No one, per the memo, …"). The quantifier scan above still
+        # runs over the whole clause, because a quantified subject stays the
+        # subject wherever commas put it.
+        comma = before.rfind(",")
+        if quantified or comma == -1:
+            negation_window = before
+        else:
+            negation_window = before[comma + 1:]
+        negated = quantified or _NEGATION.search(negation_window) is not None
+        quantifier = QUANTIFIER_NONE if quantified else (
             QUANTIFIER_SOME if _SOME_QUANTIFIER.search(before) else QUANTIFIER_ALL
         )
         # A verb with no complementiser after it is probably the main predicate of

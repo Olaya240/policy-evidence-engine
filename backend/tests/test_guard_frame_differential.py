@@ -75,7 +75,15 @@ from app.scope_layer import _AUXILIARIES, split_cue
 
 SEED = 20261102
 FRAME_SAMPLE = 5700
+# SILENT_SAMPLE is the *draw dimension* (rows the corpus builds for the silent
+# stratum), not a floor. It stays 300 for corpus size so the audit's percentages
+# keep their denominators. The floor is separate: 2026-11-03's scoping and lexicon
+# repairs moved ~180 corpus sentences out of silence -- they now draw frames and
+# withhold, which is the point -- leaving 116 silent rows on this draw. A floor of
+# 60 below that still leaves both outcomes thickly represented, which is what the
+# degenerate-corpus test exists to check.
 SILENT_SAMPLE = 300
+SILENT_FLOOR = 60
 
 #: ``say``/``tell``/``write`` do not take ``-ed``. Everything else in the two
 #: lexicons is regular, and :func:`_finite_pairs` refuses to invent a form that
@@ -429,7 +437,7 @@ def test_the_corpus_is_generated_once_and_is_not_degenerate():
     forces = Counter(reading.composed for reading in corpus.readings)
     assert forces[Force.WITHHOLDS] > 0.25 * len(corpus.readings), forces
     assert forces[Force.ASSERTS] > 0.05 * len(corpus.readings), forces
-    assert forces[None] >= SILENT_SAMPLE, forces
+    assert forces[None] >= SILENT_FLOOR, forces
 
     reasons = Counter(reading.reason for reading in corpus.readings
                       if not reading.committed)
@@ -534,7 +542,7 @@ def test_a_silent_frame_leaves_the_guard_its_own_reading():
     committed, and neither would show up if the stratum were empty.
     """
     silent = [reading for reading in readings() if reading.composed is None]
-    assert len(silent) >= SILENT_SAMPLE
+    assert len(silent) >= SILENT_FLOOR
     assert all(reading.composed is None and reading.primary is None for reading in silent)
     assert any(reading.committed for reading in silent), "no silent prefix committed"
     assert any(not reading.committed for reading in silent), "no silent prefix abstained"

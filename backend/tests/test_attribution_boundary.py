@@ -96,10 +96,18 @@ MIN_SENTENCES = 5000
 # and cognition verbs: the frame now withholds in shapes it used to pass through, so
 # the disagreement counts move *with the policy* rather than with the code's quality.
 # A count that moves without a policy change is the signal this table exists to send.
+#
+# Re-recorded again 2026-11-03 after the reader learned (a) to scope negation at the
+# clause's last comma when the pre-comma run carries no negating subject, which
+# removes fronted adverbials from the frame's way, and (b) to read ``no`` + up to
+# two head modifiers as a negated subject. Both repairs take sentences out of the
+# wrong shapes, so ``embedded_negation_leak`` (negations inside a first conjunct's
+# complement no longer reaching the second conjunct) and ``post_verbal_not``
+# (denial left unrecognised before an added lexicon verb) both drop.
 PINNED = {
     ("law1-coordination", "coordinated_and"): 900,
-    ("law1-control", "embedded_negation_leak"): 27,
-    ("law5", "post_verbal_not"): 360,
+    ("law1-control", "embedded_negation_leak"): 15,
+    ("law5", "post_verbal_not"): 336,
 }
 
 

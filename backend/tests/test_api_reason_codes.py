@@ -11,9 +11,10 @@ computes. Drift observed while writing them is recorded in
 one, so a later change that promotes either item into a typed field will fail
 these tests and must update that artifact with the new shape.
 
-The client fixture reuses ``InProcessClient`` from ``test_api.py`` (there is no
-conftest in this suite); it is the same HTTPX-over-ASGITransport path the rest of
-the API tests use.
+The client fixture reuses ``InProcessClient`` from ``test_api.py``; it is the same
+HTTPX-over-ASGITransport path the rest of the API tests use. The suite-wide
+``conftest.py`` contributes the autouse rate-limiter reset and no client: the
+limiter is process-global, so its buckets are drained between cases.
 """
 import json
 import logging

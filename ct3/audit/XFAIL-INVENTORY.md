@@ -123,21 +123,24 @@ hedge phrase, and the pre-cue form fails too.
   went red (8 corpus failures observed at 16:00Z) until the corpus was updated too.
 - **Conditional-inversion reader** (`app/semantic_guard.py`): fixes cond-h2 =
   entry 13. Landed by 16:10Z, mark deleted, benchmark row green.
-- Neither touches temp-d2 or hedge-h3 (entries 3 and 7), which are the two findings
-  this audit leaves open: their reasons must be rewritten to the measured cause (or
-  the defects fixed), not merely deleted.
+- temp-d2 and hedge-h3 (entries 3 and 7) were closed after this window: temp-d2's
+  reason was rewritten to the measured cause ("both spellings now abstain: the
+  contrast reader accepts a subject and 'any more' as well as 'anymore'") and
+  hedge-h3's defect was fixed, so the row is green and its mark is gone. Neither is
+  open on the 2026-11-03 tree.
 
 ## Re-running the check
 
 ```bash
 cd backend
-python -m pytest tests/test_xfail_inventory.py -q -rs   # 2 failed today: temp-d2, hedge-h3
-python -m pytest tests/test_semantic_benchmark.py::test_benchmark_row_matches_label -rxX
+PYTHONPATH=. python3 -m pytest tests/test_xfail_inventory.py -q -rs
+PYTHONPATH=. python3 -m pytest tests/test_semantic_benchmark.py::test_benchmark_row_matches_label -rxX
 ```
 
-- Expected today: `2 failed, 11 passed, 6 skipped`. The two failures are the fiction
-  classes; the six skips are entries whose mark is gone (five rept rows, cond-h2) or
-  whose defect is fixed, each naming which.
+- Measured 2026-11-03: `12 passed, 6 skipped, 0 failed`. The two fiction classes
+  this audit found (temp-d2's wrong reason, hedge-h3's missing hedge phrase) are
+  closed; the six skips are entries whose mark is gone (five rept rows, cond-h2),
+  each naming which.
 - After a **fix**: delete the `KNOWN_MISREADS` entry, then delete the row from
   `AUDIT` and this table (a removed mark whose row still fails fails
   `test_a_removed_mark_does_not_hide_a_live_defect`).
