@@ -457,6 +457,7 @@ def test_claim_field_set_is_pinned():
         "dependencies",
         "version",
         "explanation_trace",
+        "provider_attribution",
     ]
 
 
