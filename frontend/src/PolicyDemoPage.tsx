@@ -684,49 +684,49 @@ export default function PolicyDemoPage() {
           <span className="brand-mark">S</span>
           <div className="brand-text">
             <strong>storyconnect</strong>
-            <span>HOSPITALITY · MULTIMODAL STUDIO</span>
+            <span>POLICY EVIDENCE · STORY CONNECT</span>
           </div>
         </a>
-        <div className="top-context" aria-label={explicitOfflineDemo ? "Explicit demo fixture mode" : "Policy Demo API connected"}>
-          <span className="top-context-status"><span className="pulse" />
-            {explicitOfflineDemo ? "DEMO FIXTURE · OPT-IN" : "POLICY DEMO API · 127.0.0.1:8083"}
+        <div className={`top-context ${error ? "is-error" : loading ? "is-loading" : "is-ready"}`} aria-label={explicitOfflineDemo ? "Explicit demo fixture mode" : error ? "Policy Demo API error" : loading ? "Connecting to Policy Demo API" : "Policy Demo API ready"}>
+          <span className="top-context-status"><span className={`pulse ${error ? "is-error" : loading ? "is-loading" : "is-ready"}`} />
+            {explicitOfflineDemo ? "DEMO FIXTURE · OPT-IN" : error ? "POLICY API ERROR" : loading ? "CONNECTING TO POLICY API" : "POLICY API READY"}
           </span>
           <span className="divider" aria-hidden="true">/</span>
-          <span className="top-context-title">MULTIMODAL EVIDENCE STUDIO</span>
+          <span className="top-context-title">POLICY COMPARISON</span>
         </div>
         <div className="nav-actions">
           <nav className="mode-switcher" aria-label="Workspace mode">
             <a href="#" className="mode-pill">
-              <span aria-hidden="true">← </span><span className="mode-number">01 ·</span> Handover Copilot <span className="mode-port">(:8081)</span>
+              Handover review
             </a>
             <a href="#/demo" className="mode-pill active">
-              <span className="mode-number">02 ·</span> Isolated Policy Demo <span className="mode-port">(:8083)</span>
+              Policy comparison
             </a>
           </nav>
-          <div className="profile" aria-label="Signed in as Operations Manager">
-            <span className="profile-icon">OM</span>
-            <span>
-              Operations
-              <br />
-              <b>Manager</b>
-            </span>
-          </div>
+          <details className="mobile-nav">
+            <summary aria-label="Open workspace navigation"><span aria-hidden="true">☰</span><span>Menu</span></summary>
+            <nav aria-label="Workspace navigation">
+              <a href="#">Handover investigation</a>
+              <a href="#/demo">Policy comparison</a>
+            </nav>
+          </details>
+          <div className="profile" aria-label="Policy review workspace">Review workspace</div>
         </div>
       </header>
 
       <main>
+        <section className="overview-hero policy-overview" aria-label="Policy comparison overview">
+          <div className="overview-copy">
         <div className="eyebrow" style={{ marginBottom: 20 }}>
-          <span>STUDIO 02</span>
-          <span className="line" />
-          <span>POLICY EVIDENCE &amp; ILLUSTRATIVE MASK AUDIT STUDIO</span>
+          <span className="gold-dot" aria-hidden="true" />
+
+          <span>POLICY DEMO · POLICY COMPARISON</span>
         </div>
 
         <section className="intro">
           <div>
             <h1>
-              Policy versions,
-              <br />
-              <em>evidence-first.</em>
+              Policy <em>comparison.</em>
             </h1>
             <p>
               Compare synthetic policy revisions across v1 and v2, inspect exact SHA-256 citation provenance and
@@ -744,6 +744,12 @@ export default function PolicyDemoPage() {
           </div>
         </section>
 
+          </div>
+          <div className="overview-panel">
+            <div className="overview-panel-head">
+              <strong>Policy comparison overview</strong>
+              <span>Provenance, review status and history</span>
+            </div>
         <section className="kpi-ribbon" aria-label="Policy engine telemetry">
           <div className="kpi-tile">
             <div className="kpi-tile-header">
@@ -763,7 +769,7 @@ export default function PolicyDemoPage() {
             </div>
             <strong>Illustrative Mask Diagrams</strong>
             <small>
-              <span className="kpi-dot" style={{ background: "#7c3aed" }} />
+              <span className="kpi-dot" style={{ background: "#8a7533" }} />
               Visual IoU ≠ semantic proof
             </small>
           </div>
@@ -788,6 +794,8 @@ export default function PolicyDemoPage() {
               <span className="kpi-dot" style={{ background: "#475569" }} />
               Ephemeral in-memory session trail
             </small>
+          </div>
+        </section>
           </div>
         </section>
 
@@ -1470,8 +1478,8 @@ export default function PolicyDemoPage() {
                           width="215"
                           height="48"
                           rx="3"
-                          fill="rgba(168, 85, 247, 0.28)"
-                          stroke="#c084fc"
+                          fill="rgba(199, 163, 43, 0.22)"
+                          stroke="#c7a32b"
                           strokeWidth="1.5"
                           strokeDasharray="4 2"
                         />

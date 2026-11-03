@@ -429,7 +429,7 @@ function App() {
           <span className="brand-mark">S</span>
           <div className="brand-text">
             <strong>storyconnect</strong>
-            <span>HOSPITALITY EXPERIENCE · AI COPILOT</span>
+            <span>HOSPITALITY · EVIDENCE REVIEW</span>
           </div>
         </a>
 
@@ -440,9 +440,21 @@ function App() {
           <a href="#library">Evidence Library ({records.length})</a>
         </nav>
 
+        <details className="mobile-nav">
+          <summary aria-label="Open workspace navigation"><span aria-hidden="true">☰</span><span>Menu</span></summary>
+          <nav aria-label="Workspace navigation">
+            <a href="#setup">Investigation setup</a>
+            {investigation && <a href="#findings">Claims and evidence</a>}
+            {investigation && <a href="#history">Revision history ({history.length})</a>}
+            <a href="#library">Evidence library ({records.length})</a>
+            <a href="#/demo">Policy Demo Studio</a>
+          </nav>
+        </details>
+
         <div className="nav-actions">
           <span className="env-pill">
-            <span className="pulse" /> BACKEND 127.0.0.1:8081
+            <span className={`pulse ${recordsError ? "is-error" : recordsLoading ? "is-loading" : "is-ready"}`} />
+            {recordsLoading ? "CONNECTING TO EVIDENCE API" : recordsError ? "EVIDENCE API ERROR" : "EVIDENCE API READY"}
           </span>
           <a href="#/demo" className="gold-cta-link">
             Policy Demo Studio ↗
@@ -452,20 +464,20 @@ function App() {
 
       <main id="top">
         {/* ── Hero Section (Matching Story Connect Vercel Typography & Gold Accent) ── */}
+        <section className="overview-hero" aria-label="Investigation overview">
+          <div className="overview-copy">
         <div className="eyebrow">
-          <span className="gold-dot">✦</span>
-          <span>EMPLOYEE EXPERIENCE · LUXURY HOSPITALITY · EVIDENCE VERIFICATION</span>
+          <span className="gold-dot" aria-hidden="true" />
+          <span>LUXURY HOSPITALITY · EVIDENCE REVIEW</span>
         </div>
 
         <section className="intro">
           <div>
             <h1>
-              The digital evidence
-              <br />
-              workspace for <em>luxury hospitality.</em>
+              Evidence review for <em>luxury hospitality.</em>
             </h1>
             <p>
-              Review shift handover signals with their source context. Investigate candidate contributing factors,
+              Review shift handover claims against their source records. Investigate candidate contributing factors,
               inspect backend decision rules when provided, challenge a cited quote, and keep a clear audit trail of
               every revision.
             </p>
@@ -476,10 +488,16 @@ function App() {
               <br />
               REVIEW
             </span>
-            <span className="stamp-star">✳</span>
+            <span className="stamp-star" aria-hidden="true">✓</span>
           </div>
         </section>
 
+          </div>
+          <div className="overview-panel">
+            <div className="overview-panel-head">
+              <strong>Investigation overview</strong>
+              <span>Claims, evidence and revisions</span>
+            </div>
         {/* ── Live Backend Status & Summary Cards ── */}
         <section className="kpi-ribbon" aria-label="Live workspace metrics">
           <div className="kpi-tile">
@@ -515,6 +533,8 @@ function App() {
             <span className="kpi-label">DISPUTED EVIDENCE &amp; REVISIONS</span>
             <strong>{investigation ? `${statusCounts.disputed} Disputed` : "0 Disputed"}</strong>
             <small>{history.length} total revision event(s) in history</small>
+          </div>
+        </section>
           </div>
         </section>
 
