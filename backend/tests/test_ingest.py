@@ -91,7 +91,38 @@ def _stored_timestamps(db_path: Path, record_id: str) -> list[str]:
 
 
 def _parse_timestamp(value: str) -> datetime:
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
     return datetime.fromisoformat(value)
+
+
+def test_parse_timestamp_accepts_z_suffix_as_aware_utc():
+    parsed = _parse_timestamp("2026-10-25T06:00:00Z")
+
+    assert parsed == datetime(2026, 10, 25, 6, 0, tzinfo=timezone.utc)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset().total_seconds() == 0
+
+
+def test_parse_timestamp_z_and_explicit_utc_offsets_are_equivalent():
+    z_suffix = _parse_timestamp("2026-10-25T06:00:00Z")
+    explicit_offset = _parse_timestamp("2026-10-25T06:00:00+00:00")
+
+    assert z_suffix == explicit_offset
+
+
+def test_parse_timestamp_preserves_non_utc_offset():
+    parsed = _parse_timestamp("2026-10-25T06:00:00+05:30")
+
+    assert parsed.utcoffset().total_seconds() == 5.5 * 60 * 60
+    assert parsed.isoformat() == "2026-10-25T06:00:00+05:30"
+
+
+def test_parse_timestamp_preserves_naive_timestamp_behavior():
+    parsed = _parse_timestamp("2026-10-25T06:00:00")
+
+    assert parsed == datetime(2026, 10, 25, 6, 0)
+    assert parsed.tzinfo is None
 
 
 def _seed_count(client) -> int:
