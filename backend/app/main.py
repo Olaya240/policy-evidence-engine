@@ -18,7 +18,8 @@ from .models import (ChallengeCreate, HistoryEntry, IngestCreate, Investigation,
                      INVESTIGATION_PRESET_QUESTIONS, Record)
 from .provider_activation import (BASETEN_API_KEY_ENV_VAR,
                                  ProviderActivationError,
-                                 create_assessment_engine)
+                                 create_assessment_engine,
+                                 create_meta_assessment_engine)
 from .provider_safety import ProviderBudgetConfig
 from .rate_limit import TokenBucketRateLimiter
 from . import ingest, store
@@ -35,6 +36,11 @@ BASETEN_MAX_ESTIMATED_COST_ENV_VAR = "BASETEN_MAX_ESTIMATED_COST_USD"
 BASETEN_CONSERVATIVE_COST_ENV_VAR = "BASETEN_CONSERVATIVE_COST_PER_REQUEST_USD"
 _ACTIVATION_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 _ACTIVATION_DISABLED_VALUES = frozenset({"", "0", "false", "no", "off"})
+META_API_KEY_ENV_VAR = "MODEL_API_KEY"
+ACTIVATE_META_ENV_VAR = "ENABLE_META"
+META_MAX_REQUESTS_ENV_VAR = "META_MAX_REQUESTS"
+META_MAX_ESTIMATED_COST_ENV_VAR = "META_MAX_ESTIMATED_COST_USD"
+META_CONSERVATIVE_COST_ENV_VAR = "META_CONSERVATIVE_COST_PER_REQUEST_USD"
 
 
 def _activation_requested(environ: Mapping[str, str]) -> bool:
@@ -51,6 +57,19 @@ def _activation_requested(environ: Mapping[str, str]) -> bool:
         "%s is not a recognised activation value; serving the mock provider. "
         "Set it to one of %s to request Baseten activation.",
         ACTIVATE_BASETEN_ENV_VAR, sorted(_ACTIVATION_ENABLED_VALUES))
+    return False
+
+
+def _meta_activation_requested(environ: Mapping[str, str]) -> bool:
+    raw = environ.get(ACTIVATE_META_ENV_VAR)
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value in _ACTIVATION_ENABLED_VALUES:
+        return True
+    if value in _ACTIVATION_DISABLED_VALUES:
+        return False
+    logger.warning("%s is not a recognised activation value; serving the mock provider.", ACTIVATE_META_ENV_VAR)
     return False
 
 
@@ -73,6 +92,19 @@ def _budget_from_environment(environ: Mapping[str, str]) -> ProviderBudgetConfig
     )
 
 
+def _meta_budget_from_environment(environ: Mapping[str, str]) -> ProviderBudgetConfig | None:
+    values = (environ.get(META_MAX_REQUESTS_ENV_VAR), environ.get(META_MAX_ESTIMATED_COST_ENV_VAR),
+              environ.get(META_CONSERVATIVE_COST_ENV_VAR))
+    if not all(values):
+        return None
+    try:
+        count = int(values[0])
+    except (TypeError, ValueError):
+        return None
+    return ProviderBudgetConfig(enabled=True, max_requests=count,
+        max_estimated_cost_usd=values[1], conservative_cost_per_request_usd=values[2])
+
+
 def _environment_key_source(environ: Mapping[str, str]):
     """Hand the factory a callable instead of the secret, read only after validation."""
     def key_source():
@@ -82,15 +114,34 @@ def _environment_key_source(environ: Mapping[str, str]):
 
 
 def build_engine_from_environment(environ: Mapping[str, str]) -> AssessmentEngine:
-    """Compose the process engine: mock by default, Baseten only on explicit request.
+    """Compose the process engine: MockProvider by default; Meta or Baseten only on explicit request.
 
-    The mock provider is the only default that needs no credentials. Baseten is
-    activated only when the flag names an affirmative literal, a key is present
-    in `BASETEN_API_KEY`, and the three budget inputs are supplied. No refusal or
-    failure escapes this function: the mock provider is returned and the reason
-    is logged, so activation can never happen by accident.
+    Each optional provider requires its affirmative activation flag, a key in
+    the corresponding backend environment variable, and its three budget
+    inputs. If both providers are requested, or activation is incomplete or
+    invalid, this function returns MockProvider and logs only a sanitized
+    reason. Provider request failures after activation do not fall back to mock.
     """
-    if not _activation_requested(environ):
+    meta_requested = _meta_activation_requested(environ)
+    baseten_requested = _activation_requested(environ)
+    if meta_requested and baseten_requested:
+        logger.warning("Both ENABLE_META and ENABLE_BASETEN are enabled; serving the mock provider.")
+        return create_assessment_engine()
+    if meta_requested:
+        if not environ.get(META_API_KEY_ENV_VAR):
+            logger.warning("Meta activation was refused (key_source_required); serving the mock provider.")
+            return create_assessment_engine()
+        try:
+            return create_meta_assessment_engine(
+                key_source=lambda: environ[META_API_KEY_ENV_VAR],
+                budget_config=_meta_budget_from_environment(environ),
+            )
+        except ProviderActivationError as error:
+            logger.warning("Meta provider activation was refused (%s); serving the mock provider.", error.code)
+        except Exception:
+            logger.warning("Meta provider activation failed unexpectedly; serving the mock provider.")
+        return create_assessment_engine()
+    if not baseten_requested:
         if environ.get(BASETEN_API_KEY_ENV_VAR):
             logger.warning(
                 "%s is set but %s is not enabled; serving the mock provider and "

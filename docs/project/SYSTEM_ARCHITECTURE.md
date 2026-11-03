@@ -30,7 +30,8 @@ The diagram shows code-level boundaries, not a running deployment. Policy graph/
 | Component | Responsibility | Connection status |
 |---|---|---|
 | `frontend/src/App.tsx`, `PolicyDemoPage.tsx` | React/TypeScript handover and policy demo experiences; hash `#/demo` selects the policy page. | Implemented; Vite proxies `/api` and `/demo-api`. |
-| `backend/app/main.py` | Legacy FastAPI handover routes. | Separate API, documented at 8081. |
+| `backend/app/main.py` | FastAPI handover routes and startup provider selection. | Separate API at 8081; `MockProvider` default, optional Meta provider. |
+| `backend/app/provider_activation.py`, `provider_safety.py`, `httpx_transport.py` | Guarded provider activation, validation boundary, and fixed Meta transport. | Meta requires explicit backend environment configuration; no credential is sent to the frontend. |
 | `backend/app/store.py` | Legacy store, SQLite connection and transaction functions. | Used by the legacy API in source; state not inspected. |
 | `backend/policy_demo_api.py` | Scenario, session, history, reset, challenge endpoints. | In-memory demo path, port 8083. |
 | `backend/policy_evidence_demo.py` | Three synthetic cases and scenario/challenge calculations. | Used by demo path. |
@@ -48,4 +49,4 @@ The graph/planner path is currently a Python module boundary. The persistence de
 
 ## Provider boundary
 
-The legacy `AssessmentEngine` uses `MandatoryProviderBoundary` and runtime `MockProvider`; a bounded HTTPX adapter exists for fake-transport verification but is not selected at runtime and has no credential input. The policy API uses `FakePolicyCandidateAdapter`. These are separate provider abstractions and should not be conflated.
+The handover `AssessmentEngine` uses `MandatoryProviderBoundary` and defaults to `MockProvider`; Meta Muse Spark is an optional explicitly activated backend provider. Each new claim records attribution from the invoked instance and optional validated request ID/token usage; legacy claims resolve to `unknown`. The policy API uses `FakePolicyCandidateAdapter`, while the React Policy Demo uses synthetic scenario logic. These paths are separate: enabling Meta does not connect it to either policy-demo workflow.

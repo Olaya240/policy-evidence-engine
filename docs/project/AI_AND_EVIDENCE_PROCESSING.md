@@ -2,12 +2,12 @@
 
 ## Current provider roles
 
-There are two separate provider boundaries:
+There are separate provider boundaries:
 
-1. The legacy handover `AssessmentEngine` defaults to `MockProvider` behind `MandatoryProviderBoundary`. The allowed mock proposal contains a source record ID, exact quote, stance and rationale. The application validates source membership, unrestricted status, exact-substring quotation, allowed stance and nonblank rationale. Provider proposals do not author final status, dependencies, versions or history.
+1. The handover `AssessmentEngine` defaults to `MockProvider` behind `MandatoryProviderBoundary`. Meta Muse Spark is an optional backend provider, activated explicitly with `ENABLE_META` and the backend credential/budget environment variables documented in `backend/META_PROVIDER.md`. The allowed proposal contains a source record ID, exact quote, stance and rationale. The application validates source membership, unrestricted status, exact-substring quotation, allowed stance and nonblank rationale. Provider proposals do not author final status, dependencies, versions or history. Provider attribution is captured from the invoked instance; validated response IDs and token usage are optional, and legacy records without attribution resolve to `unknown`.
 2. The isolated policy comparison API constructs a `FakePolicyCandidateAdapter` response. It cites bounded excerpts and abstains from semantic assessment; API results remain proposal-only and `INCONCLUSIVE`.
 
-An HTTPX bounded transport adapter exists in legacy provider code for offline fake-transport verification, but runtime selection remains mock-only. No credential is configured or loaded. A real Meta Model or other external AI provider is not connected.
+Meta support applies only to the handover assessment workflow. The standalone policy-comparison API uses `FakePolicyCandidateAdapter`, and the React Policy Demo uses synthetic scenarios; neither calls Meta. No HR policy Q&A, HR-document retrieval, employee-account system, or production deployment is implemented. The prior one-request assessment remains **INCONCLUSIVE** as to provider because it predates persisted attribution.
 
 ## Processing and evidence limits
 

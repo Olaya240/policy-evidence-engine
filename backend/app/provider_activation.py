@@ -9,11 +9,13 @@ from collections.abc import Callable
 
 from .engine import AssessmentEngine
 from .httpx_transport import BasetenMuseSparkOpenTransport
+from .httpx_transport import MetaMuseSparkTransport
 from .mock_provider import MockProvider
 from .provider_safety import (
     BasetenMuseSparkOpenAdapter,
     ProviderBudgetConfig,
     ProviderCallGate,
+    MetaMuseSparkAdapter,
 )
 
 BASETEN_API_KEY_ENV_VAR = "BASETEN_API_KEY"
@@ -87,8 +89,33 @@ def create_assessment_engine(
     return engine
 
 
+def create_meta_assessment_engine(*, key_source: Callable[[], object],
+                                  budget_config: ProviderBudgetConfig) -> AssessmentEngine:
+    """Construct the fixed Meta adapter only with an explicit key source and budget."""
+    if not callable(key_source):
+        raise ProviderActivationError("key_source_required")
+    if type(budget_config) is not ProviderBudgetConfig or budget_config.enabled is not True:
+        raise ProviderActivationError("enabled_budget_required")
+    try:
+        gate = ProviderCallGate(budget_config)
+    except Exception:
+        raise ProviderActivationError("invalid_budget") from None
+    try:
+        key = key_source()
+    except Exception:
+        raise ProviderActivationError("key_unavailable") from None
+    if (type(key) is not str or not key or key.strip() != key
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in key)):
+        raise ProviderActivationError("invalid_key")
+    try:
+        return AssessmentEngine(provider=MetaMuseSparkAdapter(MetaMuseSparkTransport(key), gate))
+    except Exception:
+        raise ProviderActivationError("activation_failed") from None
+
+
 __all__ = [
     "BASETEN_API_KEY_ENV_VAR",
     "ProviderActivationError",
     "create_assessment_engine",
+    "create_meta_assessment_engine",
 ]

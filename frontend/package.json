@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --configLoader runner --host 127.0.0.1 --port 5174",
     "build": "tsc -b && vite build --configLoader runner",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/audit_remediation.test.ts && tsc --target ES2022 --module ESNext --moduleResolution Bundler --strict --outDir .test-build src/api.ts src/contracts.ts src/presentation.ts src/historyState.ts src/policyDemoState.ts src/policyDemoContract.ts src/challengeWorkflow.ts && node --test tests/api.test.mjs tests/presentation.test.mjs tests/history-state.test.mjs tests/policy-demo-state.test.mjs tests/policy-demo-contract.test.mjs tests/challenge-workflow.test.mjs && npm run test:build-output --offline",
+    "test:build-output": "npm run build --offline && node --test tests/build-output.test.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
@@ -15,5 +17,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3"
+  }
 }

@@ -1,17 +1,21 @@
 # Offline policy comparison API
 
 This isolated API serves the synthetic policy comparison workflow. It does not
-import the handover app, use a provider, or read or write a database. It is not
-connected to the static demo page.
+import the handover app, use a provider, or read or write a database. The
+standalone `frontend/public/policy-comparison-demo.html` page is a local-only
+demo with an optional request to the local `127.0.0.1:8082` Policy Comparison
+API for local development. Phase 34.8's Vite build configuration excludes that
+standalone page from production output. It is not integrated into the main
+Story Connect application and is not connected to a deployed backend.
 
 ## Local launch
 
-From the repository root in PowerShell, use the already installed hackathon
-environment:
+From the repository root in PowerShell, use the repository's backend path and
+an environment with the declared backend requirements installed:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path hackathon\backend).Path
-.\hackathon\.venv\Scripts\python.exe -m policy_api
+$env:PYTHONPATH = (Resolve-Path backend).Path
+python -m policy_api
 ```
 
 The supported entry point binds only to `127.0.0.1:8082`. The port is fixed; if
@@ -20,6 +24,11 @@ is served at `http://127.0.0.1:5174`. CORS permits only that exact origin, only
 `POST`, and only the `Content-Type` request header; credentials are disabled.
 No wildcard browser origin is enabled. Serve the page through Vite rather than
 opening it as a `file://` URL.
+
+This API is separate from the handover assessment API on port 8081. It uses a
+deterministic fake candidate adapter and does not call Meta or Baseten. The
+optional Meta provider belongs only to the handover `AssessmentEngine`; the
+main backend defaults to `MockProvider`.
 
 ## Endpoints
 

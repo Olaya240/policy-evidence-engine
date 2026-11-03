@@ -111,6 +111,33 @@ class Evidence(BaseModel):
     disputed: bool = False
 
 
+class ProviderAttribution(BaseModel):
+    """Safe, minimal identity of the provider that produced an accepted result."""
+
+    model_config = ConfigDict(extra="forbid")
+    provider: Literal["meta", "baseten", "mock", "unknown"] = "unknown"
+    model: Optional[str] = Field(default=None, max_length=100)
+    request_id: Optional[str] = Field(default=None, max_length=200)
+    usage: Optional[dict[str, int]] = None
+
+    @field_validator("request_id")
+    @classmethod
+    def request_id_is_safe_identifier(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and (not value or any(
+                char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for char in value)):
+            raise ValueError("Provider request ID is not a safe identifier")
+        return value
+
+    @field_validator("usage")
+    @classmethod
+    def usage_is_bounded_token_metadata(cls, value: Optional[dict[str, int]]) -> Optional[dict[str, int]]:
+        allowed = {"prompt_tokens", "completion_tokens", "total_tokens"}
+        if value is not None and (not set(value).issubset(allowed) or any(
+                isinstance(count, bool) or count < 0 for count in value.values())):
+            raise ValueError("Provider usage metadata is invalid")
+        return value
+
+
 class Claim(BaseModel):
     id: str
     hypothesis_id: str
@@ -135,6 +162,8 @@ class Claim(BaseModel):
     version: int
     # Additive audit metadata; absent legacy snapshots serialize as unavailable.
     explanation_trace: Optional[dict] = None
+    # Legacy claim snapshots have no provider evidence and therefore remain unknown.
+    provider_attribution: ProviderAttribution = Field(default_factory=ProviderAttribution)
 
 
 class InvestigationCreate(BaseModel):

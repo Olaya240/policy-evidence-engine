@@ -18,6 +18,9 @@ APPROVED_PROVIDER_ORIGIN = "https://provider.invalid"
 BASETEN_CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 BASETEN_APPROVED_ORIGIN = "https://inference.baseten.co"
 BASETEN_CHAT_COMPLETIONS_ENDPOINT = BASETEN_APPROVED_ORIGIN + BASETEN_CHAT_COMPLETIONS_PATH
+META_APPROVED_ORIGIN = "https://api.meta.ai"
+META_CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+META_CHAT_COMPLETIONS_ENDPOINT = META_APPROVED_ORIGIN + META_CHAT_COMPLETIONS_PATH
 _REQUEST_HEADERS = {
     "accept": "application/json",
     "accept-encoding": "identity",
@@ -344,6 +347,106 @@ class BasetenMuseSparkOpenTransport:
             if len(response.headers.raw) > _MAX_RESPONSE_HEADER_COUNT or header_size > _MAX_RESPONSE_HEADER_BYTES:
                 raise ProviderSafetyError("response_headers_too_large")
             if response.status_code < 200 or response.status_code >= 300:
+                raise ProviderSafetyError("provider_failure")
+            return _OwnedStreamingResponse(response, client)
+        except asyncio.CancelledError:
+            await HttpxAsyncTransport._cleanup(response, client, transport)
+            raise
+        except ProviderSafetyError:
+            await HttpxAsyncTransport._cleanup(response, client, transport)
+            raise
+        except httpx.TimeoutException:
+            await HttpxAsyncTransport._cleanup(response, client, transport)
+            raise ProviderSafetyError("timeout") from None
+        except Exception:
+            await HttpxAsyncTransport._cleanup(response, client, transport)
+            raise ProviderSafetyError("provider_failure") from None
+
+
+class MetaMuseSparkTransport:
+    """Fixed Meta Model API transport. Credentials are explicit and repr-redacted."""
+
+    __slots__ = ("_api_key", "_adapter", "_boundary", "_endpoint", "_sealed")
+
+    def __init__(self, api_key: str):
+        if type(api_key) is not str or not api_key or api_key.strip() != api_key:
+            raise ProviderSafetyError("invalid_transport")
+        url, origin = _parse_endpoint(META_CHAT_COMPLETIONS_ENDPOINT, META_CHAT_COMPLETIONS_PATH)
+        if origin != META_APPROVED_ORIGIN:
+            raise ProviderSafetyError("invalid_transport")
+        object.__setattr__(self, "_api_key", api_key)
+        object.__setattr__(self, "_adapter", None)
+        object.__setattr__(self, "_boundary", None)
+        object.__setattr__(self, "_endpoint", str(url))
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("transport configuration is immutable")
+        object.__setattr__(self, name, value)
+
+    def __repr__(self) -> str:
+        return "MetaMuseSparkTransport(api_key=<redacted>)"
+
+    def _bind_adapter(self, adapter: object) -> None:
+        from .provider_safety import MetaMuseSparkAdapter
+        if type(adapter) is not MetaMuseSparkAdapter or self._adapter is not None:
+            raise ProviderSafetyError("unsupported_provider")
+        object.__setattr__(self, "_adapter", adapter)
+
+    def _bind_boundary(self, adapter: object, boundary: object) -> None:
+        from .provider_safety import MandatoryProviderBoundary, MetaMuseSparkAdapter
+        if (type(adapter) is not MetaMuseSparkAdapter or self._adapter is not adapter
+                or adapter._boundary is not None or type(boundary) is not MandatoryProviderBoundary
+                or boundary._provider is not adapter or self._boundary is not None):
+            raise ProviderSafetyError("mandatory_boundary_required")
+        object.__setattr__(self, "_boundary", boundary)
+
+    async def send(self, payload: bytes, *, timeout_seconds: float) -> StreamingResponse:
+        raise ProviderSafetyError("mandatory_boundary_required")
+
+    async def _send_from_adapter(self, payload: bytes, adapter: object, boundary: object,
+                                 *, timeout_seconds: float,
+                                 _authorization: object = None) -> StreamingResponse:
+        from .provider_safety import (MandatoryProviderBoundary, MetaMuseSparkAdapter,
+                                      _valid_transport_dispatch_authorization)
+        if (type(adapter) is not MetaMuseSparkAdapter or self._adapter is not adapter
+                or adapter._transport is not self or type(boundary) is not MandatoryProviderBoundary
+                or adapter._boundary is not boundary or self._boundary is not boundary
+                or boundary._provider is not adapter
+                or not _valid_transport_dispatch_authorization(_authorization, self, payload, timeout_seconds)):
+            raise ProviderSafetyError("mandatory_boundary_required")
+        return await self._send_http(payload, timeout_seconds=timeout_seconds,
+                                      _authorization=_authorization)
+
+    async def _send_http(self, payload: bytes, *, timeout_seconds: float,
+                         _authorization: object = None) -> StreamingResponse:
+        from .provider_safety import _consume_transport_dispatch_authorization
+        if not _consume_transport_dispatch_authorization(_authorization, self, payload, timeout_seconds):
+            raise ProviderSafetyError("mandatory_boundary_required")
+        if type(payload) is not bytes:
+            raise ProviderSafetyError("invalid_request")
+        client = response = transport = None
+        headers = {**_REQUEST_HEADERS, "authorization": f"Bearer {self._api_key}"}
+        try:
+            transport = httpx.AsyncHTTPTransport(retries=0, trust_env=False, verify=True)
+            client = httpx.AsyncClient(transport=transport, auth=None, headers=headers,
+                cookies=httpx.Cookies(), event_hooks={"request": [], "response": []},
+                follow_redirects=False, trust_env=False, timeout=httpx.Timeout(timeout_seconds))
+            request = client.build_request("POST", self._endpoint, content=payload,
+                                           headers=headers, timeout=httpx.Timeout(timeout_seconds))
+            response = await client.send(request, stream=True, follow_redirects=False)
+            header_size = sum(len(n) + len(v) + 4 for n, v in response.headers.raw)
+            if len(response.headers.raw) > _MAX_RESPONSE_HEADER_COUNT or header_size > _MAX_RESPONSE_HEADER_BYTES:
+                raise ProviderSafetyError("response_headers_too_large")
+            status = response.status_code
+            if status in (401, 403):
+                raise ProviderSafetyError("authentication_failed")
+            if status == 429:
+                raise ProviderSafetyError("rate_limited")
+            if 500 <= status < 600:
+                raise ProviderSafetyError("provider_server_error")
+            if status < 200 or status >= 300:
                 raise ProviderSafetyError("provider_failure")
             return _OwnedStreamingResponse(response, client)
         except asyncio.CancelledError:

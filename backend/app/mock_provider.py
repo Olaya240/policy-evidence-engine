@@ -100,6 +100,8 @@ def validate_fixture_output(output, records):
 class MockProvider(LocalAssessmentProvider):
     """Offline provider interface. Its assessments are always independently validated."""
 
+    PROVIDER_ID = "mock"
+
     __slots__ = ("_overrides", "_sequences", "_sequence_counts", "_lock", "_calls", "_history", "_failure_message", "_sealed")
 
     def __init__(self, *, assessment_overrides=None, assessment_sequences=None, failure_message=None):

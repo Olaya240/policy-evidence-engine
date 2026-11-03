@@ -430,12 +430,12 @@ class AssessmentEngine:
             raise AttributeError("assessment engine configuration is immutable")
         object.__setattr__(self, name, value)
 
-    def _provider_assess(self, records: list[Record], hypothesis_id: str) -> list[dict]:
+    def _provider_assess(self, records: list[Record], hypothesis_id: str) -> tuple[list[dict], dict[str, object]]:
         # This is the final permission boundary before any provider sees records.
         permitted = eligible_provider_records(records)
         indexed = {record.id: record for record in permitted}
         try:
-            proposals = self.provider_boundary.assess(records, hypothesis_id)
+            proposals, attribution = self.provider_boundary.assess_with_attribution(records, hypothesis_id)
         except ProviderSafetyError as exc:
             # Preserve only the controlled category, never transport details.
             raise ProviderError(exc.code) from None
@@ -456,7 +456,7 @@ class AssessmentEngine:
                 raise ProviderError(exc.code) from None
             except Exception:
                 raise ProviderError("malformed_output") from None
-        return proposals
+        return proposals, attribution
 
     def _review_item_with_trace(self, item: Evidence, hypothesis_id: str) -> tuple[Evidence, dict]:
         """Apply local review and return bounded metadata from that same decision."""
@@ -506,7 +506,7 @@ class AssessmentEngine:
 
     def _claim(self, claim_id: str, hypothesis_id: str, records: list[Record], *, version: int = 1, extra: list[dict] | None = None) -> dict:
         indexed = {r.id: r for r in records if not r.restricted}
-        raw_items = self._provider_assess(records, hypothesis_id)
+        raw_items, provider_attribution = self._provider_assess(records, hypothesis_id)
         if extra:
             raw_items.extend(extra)
         evidence = []
@@ -537,7 +537,8 @@ class AssessmentEngine:
                      summary=f"{status_decision.status.value.title()} evidence for {hypothesis_id.replace('_', ' ').lower()}.", evidence=evidence,
                      conflicts=status_decision.conflicts, missing_evidence=missing,
                      dependencies=sorted({e.source_record_id for e in evidence}), version=version,
-                     explanation_trace=trace).model_dump(mode="json")
+                     explanation_trace=trace,
+                     provider_attribution=provider_attribution).model_dump(mode="json")
 
     def investigate(self, records: list[Record]) -> list[dict]:
         return [self._claim(h.id, h.id, records) for h in HYPOTHESES]
@@ -567,9 +568,11 @@ class AssessmentEngine:
             # `expected_claims`, so aliasing let the guard below write into it.
             raw["evidence"].append(dict(item, disputed=True) if matches_request else dict(item))
         if not matching_evidence:
-            candidates = [a for a in self._provider_assess([record], current["hypothesis_id"]) if a["source_record_id"] == record_id and quote in a["quote"]]
+            challenge_proposals, challenge_attribution = self._provider_assess([record], current["hypothesis_id"])
+            candidates = [a for a in challenge_proposals if a["source_record_id"] == record_id and quote in a["quote"]]
             if not candidates:
                 raise AssessmentError("This source is not an assessed dependency for the selected claim")
+            raw["provider_attribution"] = challenge_attribution
             evidence, new_evidence_evaluated_at = _validate_assessment_with_time(
                 dict(candidates[0], quote=quote), {record.id: record}, now=now
             )
