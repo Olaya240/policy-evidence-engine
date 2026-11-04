@@ -384,18 +384,23 @@ def build_initial_proposal_payload(pair: PolicyPair, request_id: str) -> dict[st
     }
 
 
-def run_initial_evidence_investigation(pair: PolicyPair) -> dict[str, Any]:
+def run_initial_evidence_investigation(pair: PolicyPair, proposal_provider=None) -> dict[str, Any]:
     """Execute initial proposal generation and local citation derivation."""
     if not isinstance(pair, PolicyPair):
         raise PolicyCompareError("invalid_input")
 
     request_envelope = build_proposal_request(pair)
-    raw_payload = build_initial_proposal_payload(pair, request_envelope["request_id"])
-
-    adapter = DeterministicMockProposalAdapter(raw_payload)
-    raw_response = adapter.generate_proposals(request_envelope)
+    if proposal_provider is None:
+        raw_payload = build_initial_proposal_payload(pair, request_envelope["request_id"])
+        adapter = DeterministicMockProposalAdapter(raw_payload)
+        raw_response = adapter.generate_proposals(request_envelope)
+        provider_attribution = {"provider": "synthetic", "model": None}
+    else:
+        raw_response, provider_attribution = proposal_provider.generate(pair, request_envelope)
 
     normalized = normalize_proposal_response(pair, request_envelope, raw_response)
+    if len(normalized["candidates"]) != 1:
+        raise PolicyProposalContractError()
     candidate = normalized["candidates"][0]
 
     mapped = _map_candidate(candidate)
@@ -424,6 +429,7 @@ def run_initial_evidence_investigation(pair: PolicyPair) -> dict[str, Any]:
     return {
         "comparison_id": pair.comparison_id,
         "request_id": request_envelope["request_id"],
+        "provider_attribution": provider_attribution,
         "proposed_relation": candidate["proposed_relation"],
         "candidate_id": candidate["candidate_id"],
         "reasoning": candidate["reasoning"],
@@ -578,6 +584,10 @@ def recompute_investigation_after_challenge(
     validated = validate_result(pair, core_result)
 
     return {
+        "provider_attribution": initial_investigation.get(
+            "provider_attribution", {"provider": "synthetic", "model": None}
+        ),
+        "recomputation_provider": "local_policy_engine",
         "challenge": {
             "challenge_id": challenge.challenge_id,
             "target_department": challenge.target_department,

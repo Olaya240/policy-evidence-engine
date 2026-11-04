@@ -91,7 +91,7 @@ def _response(content, *, extra_message=None, extra_top=None):
         "id": "chatcmpl-synthetic",
         "object": "chat.completion",
         "created": 1,
-        "model": "meta-models/muse-spark-open",
+        "model": "meta-models/muse-spark-open-1026",
         "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
     }
@@ -139,7 +139,7 @@ def test_baseten_request_pins_endpoint_and_model_and_allows_only_minimal_fields(
     assert request.headers["authorization"] == "Bearer SYNTHETIC_TEST_KEY_NEVER_SENT"
     wire = json.loads(request.content)
     assert set(wire) == {"model", "messages"}
-    assert wire["model"] == "meta-models/muse-spark-open"
+    assert wire["model"] == "meta-models/muse-spark-open-1026"
     assert len(wire["messages"]) == 2
     assert all(set(message) == {"role", "content"} for message in wire["messages"])
     roles = [message["role"] for message in wire["messages"]]

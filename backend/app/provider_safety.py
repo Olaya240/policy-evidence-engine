@@ -668,7 +668,7 @@ class BasetenMuseSparkOpenAdapter:
 
     __slots__ = ("_transport", "_gate", "_boundary", "_sealed")
 
-    MODEL_SLUG = "meta-models/muse-spark-open"
+    MODEL_SLUG = "meta-models/muse-spark-open-1026"
     PROVIDER_ID = "baseten"
     _OUTPUT_INSTRUCTIONS = (
         " Return only a JSON array. Each array item must have exactly these string fields: "
