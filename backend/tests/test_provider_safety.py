@@ -21,6 +21,7 @@ from app.provider_safety import (
     MandatoryProviderBoundary,
     SerializedProviderRequest,
     bounded_provider_call,
+    parse_provider_proposals,
     serialize_provider_request,
 )
 from app.engine import AssessmentEngine, ProviderError
@@ -271,6 +272,57 @@ def test_content_length_header_is_optional_but_validated(content_length, body, e
         assert error.value.code == expected
 
 
+@pytest.mark.parametrize("body", [
+    b'[{"source_record_id":"A","source_record_id":"B","quote":"text","stance":"SUPPORTS","rationale":"reason"}]',
+    b'NaN',
+    b'Infinity',
+    b'-Infinity',
+    b'[{"source_record_id":"A","quote":"text","stance":"SUPPORTS","rationale":"reason"',
+    b'\xff',
+    b'',
+])
+def test_strict_proposal_parser_rejects_ambiguous_or_empty_json(body):
+    with pytest.raises(ProviderSafetyError) as error:
+        asyncio.run(_bounded_transport_call(FakeTransport(body), _request(), _enabled_gate()))
+    assert error.value.code == "malformed_response"
+
+
+@pytest.mark.parametrize("body", [
+    b'{"refusal":"synthetic refusal"}',
+    b'{"error":"synthetic provider error"}',
+    b'"refused"',
+])
+def test_refusal_and_error_envelopes_do_not_become_empty_proposals(body):
+    with pytest.raises(ProviderSafetyError) as error:
+        asyncio.run(_bounded_transport_call(FakeTransport(body), _request(), _enabled_gate()))
+    assert error.value.code == "malformed_output"
+
+
+@pytest.mark.parametrize("extra", [
+    {"review_state": "ACCEPTED"},
+    {"status": "SUPPORTED"},
+    {"confidence": 1.0},
+    {"dependencies": ["SYN-1"]},
+    {"history": [{"status": "SUPPORTED"}]},
+])
+def test_provider_proposals_cannot_assign_engine_owned_fields(extra):
+    request = serialize_provider_request([Record(
+        id="SYN-1", timestamp=SEED_RECORDS[0].timestamp, department="Synthetic",
+        text="Checklist binder was missing.", tags=[],
+    )], "CHECKLIST_UNAVAILABLE")
+    proposal = {
+        "source_record_id": "SYN-1", "quote": "Checklist binder was missing.",
+        "stance": "SUPPORTS", "rationale": "synthetic rationale", **extra,
+    }
+    with pytest.raises(ProviderSafetyError) as error:
+        parse_provider_proposals(json.dumps([proposal]).encode("utf-8"), request)
+    assert error.value.code == "malformed_output"
+
+
+def test_empty_proposal_array_remains_distinct_from_empty_response_body():
+    assert asyncio.run(_bounded_transport_call(FakeTransport(b"[]"), _request(), _enabled_gate())) == []
+
+
 def test_noncompliant_transport_oversized_chunk_is_rejected():
     class OversizedChunkResponse:
         content_length = None
@@ -332,6 +384,26 @@ def test_bounded_provider_rejects_custom_gate_objects_and_subclasses():
     with pytest.raises(ProviderSafetyError) as rejected_config:
         ProviderCallGate(ConfigSubclass())
     assert rejected_config.value.code == "invalid_budget"
+
+
+def test_approved_adapter_is_immutable_and_protocol_shape_does_not_authorize_new_types():
+    adapter = HttpxAsyncTransport("https://provider.invalid" + ASSESSMENT_PATH)
+    bounded = BoundedTransportProvider(adapter)
+    with pytest.raises(AttributeError):
+        bounded._transport = object()
+    with pytest.raises(AttributeError):
+        bounded._gate = ProviderCallGate()
+
+    class ProtocolShapedAdapter:
+        def _bind_boundary(self, _boundary):
+            return None
+
+        def _assess_from_boundary(self, _request, _boundary, *, timeout_seconds=MAX_REQUEST_TIMEOUT_SECONDS):
+            return []
+
+    with pytest.raises(ProviderSafetyError) as error:
+        MandatoryProviderBoundary(ProtocolShapedAdapter())
+    assert error.value.code == "unsupported_provider"
 
 
 def test_serialized_transport_dispatch_requires_mandatory_boundary(monkeypatch):
@@ -439,6 +511,43 @@ def test_engine_mandatorily_serializes_and_gates_transport_calls(monkeypatch):
         assert "hidden.person@example.invalid" not in payload.decode()
 
 
+@pytest.mark.parametrize(("text", "stance", "expected_state", "expected_status"), [
+    ("Checklist binder was missing during handover.", "SUPPORTS", "ACCEPTED", "PARTIAL"),
+    ("The desk lamp was replaced before dinner.", "SUPPORTS", "UNVERIFIED", "INSUFFICIENT"),
+])
+def test_bounded_provider_proposals_still_pass_engine_semantic_review(
+    monkeypatch, text, stance, expected_state, expected_status,
+):
+    source = Record(
+        id="SYN-REMOTE", timestamp=SEED_RECORDS[0].timestamp,
+        department="Synthetic", text=text, tags=[],
+    )
+    payload = json.dumps([{
+        "source_record_id": source.id,
+        "quote": source.text,
+        "stance": stance,
+        "rationale": "synthetic provider proposal",
+    }]).encode("utf-8")
+    calls = []
+
+    def handler(request):
+        calls.append(request.read())
+        return httpx.Response(200, stream=_AsyncBody(payload))
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_kwargs: httpx.MockTransport(handler))
+    transport = HttpxAsyncTransport("https://provider.invalid" + ASSESSMENT_PATH)
+    engine = AssessmentEngine(BoundedTransportProvider(transport, _enabled_gate()))
+
+    claim = engine.assess_hypothesis([source], "CHECKLIST_UNAVAILABLE")
+
+    assert len(calls) == 1
+    assert claim["evidence"][0]["review_state"] == expected_state
+    assert claim["status"] == expected_status
+    assert "proposed_stance" in claim["evidence"][0]
+    assert "review_state" not in json.loads(calls[0])["input"]
+    assert "status" not in json.loads(calls[0])["input"]
+
+
 def test_serialization_and_authorization_failures_stop_before_transport(monkeypatch):
     calls = []
     monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_kwargs: httpx.MockTransport(lambda request: (calls.append(request) or httpx.Response(200, stream=_AsyncBody(b"[]")))))
@@ -463,7 +572,9 @@ def test_engine_rejects_unsupported_provider_bypass_and_raw_payload():
     direct_transport = FakeTransport()
     with pytest.raises(ProviderSafetyError) as direct_error:
         asyncio.run(bounded_provider_call(direct_transport, _request()))
-    assert direct_error.value.code == "unsupported_transport"
+    # The failing argument is a provider, not a transport; the code was renamed
+    # so a bad provider cannot read as a transport fault.
+    assert direct_error.value.code == "unsupported_provider"
     assert direct_transport.calls == 0
 
     transport = FakeTransport()

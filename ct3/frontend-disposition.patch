@@ -1,0 +1,41 @@
+diff --git a/src/App.tsx b/src/App.tsx
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -14,7 +14,7 @@
+ type ExplanationTrace = {
+   status_rule_id?: string;
+   confidence_rule_id?: string;
+-  evidence_dispositions?: Record<string, string> | Array<{ source_record_id?: string; record_id?: string; disposition: string; reason?: string }>;
++  evidence_dispositions?: Record<string, string> | Array<{ source_record_id?: string; record_id?: string; codes?: string[]; disposition?: string; reason?: string }>;
+   rules_triggered?: ExplanationTraceRule[];
+   notes?: string[];
+ };
+@@ -447,17 +447,27 @@
+ }
+ 
++function dispositionText(item: {
++  codes?: string[];
++  disposition?: string;
++  reason?: string;
++}): string {
++  const base = item.codes && item.codes.length > 0 ? item.codes.join(", ") : item.disposition;
++  const text = typeof base === "string" && base.length > 0 ? base : "UNKNOWN_DISPOSITION";
++  return item.reason ? `${text} (${item.reason})` : text;
++}
++
+ function renderEvidenceDispositions(
+   dispositions: ExplanationTrace["evidence_dispositions"]
+ ): Array<{ key: string; value: string }> {
+   if (!dispositions) return [];
+   if (Array.isArray(dispositions)) {
+     return dispositions.map((item, idx) => ({
+       key: item.source_record_id || item.record_id || `EV-${idx + 1}`,
+-      value: item.reason ? `${item.disposition} (${item.reason})` : item.disposition,
++      value: dispositionText(item),
+     }));
+   }
+   return Object.entries(dispositions).map(([key, value]) => ({
+     key,
+     value: typeof value === "string" ? value : JSON.stringify(value),
+   }));
+ }

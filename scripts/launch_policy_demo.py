@@ -227,7 +227,11 @@ def verify_process_ownership(
     actual_executable, command_line = info.get("ExecutablePath"), info.get("CommandLine")
     if not isinstance(actual_executable, str) or not isinstance(command_line, str):
         return False, f"Process metadata is incomplete for PID {pid}."
-    if ntpath.normcase(ntpath.normpath(argv[0])) != ntpath.normcase(ntpath.normpath(executable)):
+    # `executable` is recorded resolved (`expected_identity`), so the argument is
+    # resolved too. On Windows this is the identity; on POSIX a venv interpreter
+    # is a symlink, so the unresolved comparison refused to terminate its own
+    # launcher process.
+    if ntpath.normcase(ntpath.normpath(str(Path(argv[0]).resolve()))) != ntpath.normcase(ntpath.normpath(executable)):
         return False, f"Recorded {service_name} executable and command line disagree."
     if ntpath.normcase(ntpath.normpath(actual_executable)) != ntpath.normcase(ntpath.normpath(executable)):
         return False, f"Process executable does not match the recorded {service_name} executable."

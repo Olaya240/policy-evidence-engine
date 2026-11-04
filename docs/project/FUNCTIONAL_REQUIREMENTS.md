@@ -17,7 +17,7 @@ Statuses describe evidence in the current source and governance documentation, n
 | FR-11 | Require human review where semantics, applicability, or impact are uncertain. | IMPLEMENTED | Explicit in policy API/demo contracts and user-facing limitations. |
 | FR-12 | Maintain auditability and traceable revisions. | PARTIALLY IMPLEMENTED | Session audit trail is ephemeral in the policy demo; legacy handover app has version/history records. Durable policy-graph audit storage is design-only. |
 | FR-13 | Persist canonical policy graph snapshots with deterministic round trips. | BLOCKED | Persistence contract and vectors exist; RT-01–RT-03 incomplete, database execution BLOCKED, prototype gate CLOSED. |
-| FR-14 | Connect a real model or Meta Model provider for semantic interpretation. | PROPOSED | No real provider is connected. Runtime defaults remain `MockProvider` / fake adapter. |
+| FR-14 | Connect a real model or Meta Model provider for semantic interpretation. | PARTIALLY IMPLEMENTED | The handover backend has an optional, explicitly activated Meta Muse Spark adapter; `MockProvider` remains the default. The policy demo and comparison API remain synthetic/fake, and this is not HR policy Q&A or document retrieval. |
 | FR-15 | Retrieve policy passages using embeddings or vector search. | NOT IMPLEMENTED | No embedding or vector-search component was found in the inspected source inventory. |
 | FR-16 | Authenticate users and enforce production roles. | NOT IMPLEMENTED | The handover README explicitly says no authentication; no production identity system is evidenced. |
 

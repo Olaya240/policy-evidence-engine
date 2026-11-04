@@ -8,7 +8,7 @@ Policy API docs describe loopback binding, strict input validation, request boun
 
 ## Provider and evidence trust
 
-Runtime provider selection remains `MockProvider` for the handover app and `FakePolicyCandidateAdapter` for the policy comparison API. The bounded HTTPX adapter is not selected and does not load credentials. Do not infer a live provider or API key path from adapter code or proposals.
+The handover backend defaults to `MockProvider`. Meta Muse Spark is an optional provider selected only when `ENABLE_META`, `MODEL_API_KEY`, and all three Meta budget variables are valid; it reads the credential only in the backend process. `ENABLE_BASETEN` and `ENABLE_META` together fail closed to mock. The standalone policy-comparison API uses `FakePolicyCandidateAdapter`; the React Policy Demo is a separate synthetic workflow. Provider attribution comes from the invoked instance, may include a bounded response request ID and token counts, and resolves to `unknown` for legacy or unidentifiable records. The previous one-request assessment remains inconclusive as to provider.
 
 Quotes and citations establish provenance only. Semantic support, applicability, precedence, complete coverage, and operational impact need separate evidence and human review. Source text is untrusted data; provider proposals are not authoritative conclusions.
 

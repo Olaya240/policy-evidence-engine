@@ -3,10 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
+
+# Explicit stand-in for an identity this module cannot establish. A run record
+# states that it does not know, rather than omitting the field and looking like
+# it recorded something.
+UNKNOWN = "unknown"
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,119}$")
@@ -84,6 +90,16 @@ def _safe_metadata_id(value: str, *, allow_version: bool = False) -> bool:
 
 @dataclass(frozen=True)
 class AttemptMetadata:
+    """Usage metadata for one case.
+
+    `request_count` is the number of controlled requests spent on this case. It
+    is deliberately not the run-wide counter: a cumulative number cannot be
+    checked against the attempt it is attached to, and every attempt after the
+    first would misreport its own cost. Zero is legal and means the run
+    controller refused the case before reserving anything (for example
+    `request_limit`), so no request was spent on it.
+    """
+
     case_id: str
     request_count: int
     latency_ms: int | None = None
@@ -97,7 +113,7 @@ class AttemptMetadata:
     def _validate(self) -> None:
         if not _safe_metadata_id(self.case_id):
             raise ValueError("Invalid case identifier")
-        if type(self.request_count) is not int or self.request_count < 1:
+        if type(self.request_count) is not int or self.request_count < 0:
             raise ValueError("Invalid request count")
         for value in (self.latency_ms, self.input_tokens, self.output_tokens):
             if value is not None and (type(value) is not int or value < 0):
@@ -119,6 +135,21 @@ class AttemptMetadata:
 
 @dataclass
 class ExperimentRunManifest:
+    """Metadata for one evaluation run, bound to the attempts actually made.
+
+    Two mechanisms keep the record attached to the run it describes:
+
+    * Attempts enter only through `add_attempt`, which fingerprints the list.
+      `to_dict` recomputes the fingerprint and refuses a list that was appended
+      to, replaced, or emptied behind the class's back, so an attempt cannot be
+      added after the fact merely because `attempts` is a list.
+    * `seal` is the point at which the manifest claims to describe a run. A
+      sealed manifest must carry at least one attempt (a run that recorded
+      nothing is not a run record) and must name the code and the model behind
+      it, with `UNKNOWN` as the accepted way to say "not established". After
+      sealing the attempt list is frozen.
+    """
+
     run_id: str
     dataset_sha256: str
     evaluator_version: str
@@ -132,9 +163,12 @@ class ExperimentRunManifest:
     temperature: float | None = None
     seed: int | None = None
     attempts: list[AttemptMetadata] = field(default_factory=list)
+    _attempts_sha256: str | None = field(default=None, init=False, repr=False, compare=False)
+    _sealed: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self._validate()
+        self._attempts_sha256 = self._fingerprint_attempts()
 
     def _validate(self) -> None:
         if not _safe_metadata_id(self.run_id):
@@ -154,11 +188,34 @@ class ExperimentRunManifest:
         if self.seed is not None and type(self.seed) is not int:
             raise ValueError("Invalid seed metadata")
 
+    def _fingerprint_attempts(self) -> str | None:
+        """Digest of the attempt list exactly as it stands now."""
+        if type(self.attempts) is not list or any(type(item) is not AttemptMetadata for item in self.attempts):
+            return None
+        payload = [attempt.to_dict() for attempt in self.attempts]
+        return sha256_hex(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
     def add_attempt(self, attempt: AttemptMetadata) -> None:
+        if self._sealed:
+            raise ValueError("Manifest is sealed; attempts cannot be added")
         if type(attempt) is not AttemptMetadata:
             raise ValueError("Invalid attempt metadata")
         attempt._validate()
         self.attempts.append(attempt)
+        self._attempts_sha256 = self._fingerprint_attempts()
+
+    def seal(self) -> None:
+        """Freeze the record once every attempt has been recorded."""
+        if self._sealed:
+            raise ValueError("Manifest is already sealed")
+        self._validate()
+        if type(self.attempts) is not list or not self.attempts:
+            raise ValueError("A sealed manifest must record at least one attempt")
+        if self.code_revision is None or self.model_name is None:
+            raise ValueError("A sealed manifest must record code_revision and model_name")
+        if self._attempts_sha256 is None or self._fingerprint_attempts() != self._attempts_sha256:
+            raise ValueError("Manifest attempts were modified outside add_attempt")
+        self._sealed = True
 
     def to_dict(self) -> dict[str, Any]:
         # Explicit fields prevent accidental inclusion of prompts, proposals, or record text.
@@ -167,6 +224,8 @@ class ExperimentRunManifest:
             raise ValueError("Invalid attempt metadata")
         for attempt in self.attempts:
             attempt._validate()
+        if self._attempts_sha256 is None or self._fingerprint_attempts() != self._attempts_sha256:
+            raise ValueError("Manifest attempts were modified outside add_attempt")
         return {
             "schema_version": "1",
             "run_id": self.run_id,

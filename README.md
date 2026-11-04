@@ -1,12 +1,12 @@
 # Story Connect AI — Policy Evidence Engine and isolated handover prototype
 
-This directory contains the offline **Policy Evidence Engine** project: a synthetic policy-change demo, an isolated policy comparison API, an in-memory policy graph and challenge planner, and a separate handover investigation prototype. The policy persistence contract is documentation/specification only; database execution remains BLOCKED and the prototype gate remains CLOSED.
+This repository contains a synthetic policy comparison demo, a separate synthetic policy demo UI/API, and a handover investigation prototype. The policy graph persistence contract remains documentation/specification only; database execution remains BLOCKED and the prototype gate remains CLOSED.
 
-The project documentation package is indexed at [`docs/project/PROJECT_DOCUMENTATION_INDEX.md`](docs/project/PROJECT_DOCUMENTATION_INDEX.md). It distinguishes implemented source paths from isolated modules and proposed persistence/provider work.
+The project documentation package is indexed at [`docs/project/PROJECT_DOCUMENTATION_INDEX.md`](docs/project/PROJECT_DOCUMENTATION_INDEX.md). It distinguishes implemented source paths from isolated modules and proposed persistence work.
 
-The policy comparison and policy demo use synthetic fixtures and fake adapters. The handover application remains a local prototype without authentication. No real external model provider is connected. Exact citation provenance does not establish semantic support or applicability; human review is required.
+The policy comparison API uses synthetic inputs and a fake adapter. The Policy Demo uses fictional scenarios and an in-memory session API. The separate handover backend defaults to `MockProvider`; it can optionally use Meta Muse Spark when explicitly enabled in the backend process. These workflows are not HR policy Q&A or document retrieval. The handover application has no authentication and is not production software. Exact citation provenance does not establish semantic support or applicability; human review is required.
 
-The publication excludes the governance, provider, and policy-persistence documents shown in the requested screenshots. Local databases, environment files, credentials, build artifacts, and caches are also excluded by `.gitignore`.
+Local databases, environment files, credentials, build artifacts, and caches are excluded by `.gitignore`.
 
 ---
 
@@ -17,23 +17,21 @@ Local prototype for reviewing recurring missing information in hotel shift hando
 ## Requirements and launch
 
 - Python 3.10+ and `pip` for the backend.
-- Node.js 20+ and npm for the frontend. The frontend dependencies are declared locally in `frontend/package.json`.
-- Install dependencies only into a dedicated prototype environment when ready: `python -m venv hackathon/.venv`, activate it, then `pip install -r hackathon/backend/requirements.txt`. From `hackathon/frontend`, run `npm install`.
-- From the repository root, initialize the local synthetic database: `PYTHONPATH=hackathon/backend python -m app.store init` (PowerShell: `$env:PYTHONPATH='hackathon/backend'; python -m app.store init`). The default path is `hackathon/data/prototype.sqlite3`; override with `HACKATHON_DB_PATH` only to another local prototype path.
-- From the repository root, start the backend: `PYTHONPATH=hackathon/backend uvicorn app.main:app --reload --port 8081` (PowerShell: `$env:PYTHONPATH='hackathon/backend'; uvicorn app.main:app --reload --port 8081`). API docs are at `http://127.0.0.1:8081/docs`.
-- In another terminal, from `hackathon/frontend`, run `npm run dev`. Vite serves the UI at `http://127.0.0.1:5174`, proxies `/api` to the handover application at `127.0.0.1:8081`, and proxies `/demo-api` to the isolated policy demo API at `127.0.0.1:8083`. The active Policy API is not part of this demo proxy.
-- Launcher shutdown checks the recorded executable and command line to reduce accidental termination. PID reuse and the check-to-kill race remain possible, and Windows `taskkill /T` can affect descendant processes.
-- Backend tests use uniquely named temporary SQLite databases inside `hackathon/data/` and remove them during fixture teardown; they do not use the default development database. From the repository root with the backend environment active, run `PYTHONPATH=hackathon/backend pytest -q hackathon/backend/tests` (PowerShell: `$env:PYTHONPATH=(Resolve-Path hackathon/backend).Path; .\hackathon\.venv\Scripts\python.exe -m pytest -q hackathon\backend\tests`). Frontend typecheck: from `hackathon/frontend`, run `npm run typecheck`.
+- Node.js 22.6+ and npm for the frontend. The test suite uses Node's `--experimental-strip-types` flag, introduced in Node 22.6; the frontend dependencies are declared locally in `frontend/package.json`.
+- From the repository root, create a Python environment and install backend requirements with `python -m venv .venv`, activate it, then run `python -m pip install -r backend/requirements.txt`. Install declared frontend dependencies with `npm ci` from `frontend/`.
+- The synthetic Policy Demo at `http://127.0.0.1:5174/#/demo` uses the existing offline launcher: run `python scripts/launch_policy_demo.py` from the repository root. It starts only the API on `127.0.0.1:8083` and Vite on `127.0.0.1:5174`; it does not start the handover backend or policy-comparison API. Press Ctrl+C to stop the foreground launcher, or use `python scripts/launch_policy_demo.py --stop` for its tracked background processes.
+- The separate handover UI/backend uses Vite port 5174 and FastAPI port 8081. From the repository root in PowerShell, set `$env:PYTHONPATH = (Resolve-Path backend).Path`; initialize the local synthetic database with `python -m app.store init`, then start `python -m uvicorn app.main:app --host 127.0.0.1 --port 8081`. Start the frontend with `npm run dev` from `frontend/`. The default database is `data/prototype.sqlite3`; `HACKATHON_DB_PATH` may select another permitted local prototype path. API docs are at `http://127.0.0.1:8081/docs`.
+- The frontend proxies `/api` to the handover backend on port 8081 and `/demo-api` to the Policy Demo API on port 8083. The standalone policy-comparison API on port 8082 is a separate workflow and is not part of that proxy.
+- Launcher shutdown checks recorded executable and command-line identity, but PID reuse and a check-to-stop race remain possible; Windows tree termination can affect descendants.
+- Backend tests use temporary SQLite files. From the repository root with the backend environment active, run `python -m pytest -q backend/tests`. From `frontend/`, use `npm test`, `npm run typecheck`, or `npm run build`.
 
 Initialization is explicit; importing modules and collecting tests does not create a database. The API refuses database-backed operations until initialization has been run. No endpoint exposes the restricted canary record. The access-control filter has an isolated unit test; its in-process context is not authentication.
 
-The repository's existing `.gitignore` does not cover `hackathon/data/`; the synthetic SQLite file will appear as an untracked local artifact after initialization. Do not stage or commit that runtime file. No repository-wide ignore rules were changed for this isolated phase.
+The root `.gitignore` excludes local SQLite databases, environment files, and generated build/cache artifacts. Keep local runtime data and credentials out of commits.
 
 ## Local API
 
-See [AI_PROVIDER_BOUNDARY.md](AI_PROVIDER_BOUNDARY.md) for the current offline provider contract, deterministic validation rules, failure handling, and prerequisites for any future provider adapter.
-
-See [SEMANTIC_PROVIDER_EXPERIMENT.md](SEMANTIC_PROVIDER_EXPERIMENT.md) for the controlled, synthetic-only plan to compare a future model-assisted assessor with the measured baseline and phrase-cue guard. It does not enable a provider or authorize API calls.
+The handover backend defaults to `MockProvider`. Optional Meta Muse Spark activation requires the backend process variables `ENABLE_META`, `MODEL_API_KEY`, `META_MAX_REQUESTS`, `META_MAX_ESTIMATED_COST_USD`, and `META_CONSERVATIVE_COST_PER_REQUEST_USD`; `ENABLE_BASETEN` must not be enabled at the same time. The credential stays in the backend environment and is never a Vite variable. See [Meta provider notes](backend/META_PROVIDER.md). Activation does not connect the Policy Demo or policy-comparison API to Meta.
 
 - `GET /api/health`
 - `GET /api/records`
@@ -49,11 +47,11 @@ Assessments are `SUPPORTED`, `PARTIAL`, `CONTRADICTED`, or `INSUFFICIENT`; sourc
 Run the deterministic synthetic gold-set harness from the repository root with the backend environment:
 
 ```powershell
-$env:PYTHONPATH = (Resolve-Path hackathon\backend).Path
-.\hackathon\.venv\Scripts\python.exe -m app.evaluate
+$env:PYTHONPATH = (Resolve-Path backend).Path
+.\.venv\Scripts\python.exe -m app.evaluate
 ```
 
-Gold labels and case rationales are in `backend/evaluation/gold_cases.json`; the original 14 labels are retained and the added adversarial cases are fixture judgments independent of engine output. The evaluator reports unguarded baseline and guarded results over the same cases, including false-support and false-neutral rates over explicit gold-label denominators. It creates then removes uniquely named SQLite files under `hackathon/data/` for recomputation/history checks. Its 21-case synthetic set is a regression harness, not a general performance estimate.
+Gold labels and case rationales are in `backend/evaluation/gold_cases.json`; the original 14 labels are retained and the added adversarial cases are fixture judgments independent of engine output. The evaluator reports unguarded baseline and guarded results over the same cases, including false-support and false-neutral rates over explicit gold-label denominators. It creates then removes uniquely named SQLite files under `data/` for recomputation/history checks. Its 21-case synthetic set is a regression harness, not a general performance estimate.
 
 The guard is a deliberately narrow phrase cue list for the five current prototype hypotheses. It checks the quoted text after exact-substring provenance validation, retains the proposed stance for audit, and downgrades a mismatch or unknown relation to `NEUTRAL`; it never flips a proposal to the opposite stance. It replaces provider rationale with fixed non-causal wording. This catches some included irrelevant and neutral-as-contradiction examples, but evaluation also demonstrates substantial false-neutral behavior on paraphrases and alternative wording. It cannot reliably understand arbitrary language, paraphrases, negation, context, partial semantic entailment, or causation. Unmatched evidence may be downgraded even when a human would find it relevant. Treat this as a local regression guard, not general semantic validation or a substitute for human review.
 

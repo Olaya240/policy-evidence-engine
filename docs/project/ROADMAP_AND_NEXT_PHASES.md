@@ -11,6 +11,6 @@ This roadmap is descriptive and grants no authorization. Phase 20A sequencing re
 | 5 | Implementation proposal | Only after separate authorization and gate review, implement approved contract. | Not currently authorized; database execution BLOCKED. |
 | 6 | Verification | Plan database-independent tests first; separately authorize any database validation/evaluation. | No tests/evaluations authorized in this phase. |
 | 7 | Integration | Connect graph planner, reassessment, UI/API and audit semantics under reviewed contract. | Current modules are isolated or scenario-limited. |
-| 8 | Provider/deployment | Separate provider, secret, privacy, authentication and release decisions. | Mock/fake defaults remain; no external provider. |
+| 8 | Provider/deployment | Separate privacy, authentication and release decisions remain. | The handover backend has optional Meta Muse Spark support and attribution; mock remains default. Policy-demo AI, HR retrieval, and deployment are not implemented. |
 
 No step below the documentation/specification boundary should begin by treating this roadmap as permission. Prototype gate remains CLOSED.

@@ -1,0 +1,232 @@
+"""Negation corpus for the phrase cue guard (`app/semantic_guard.py`).
+
+``_is_negated`` was widened to catch a negation carried by an auxiliary that
+sits between the negation word and the cue ("did not have enough time ...").
+That fix is only correct if it fires on true clause negation and stays silent
+when ``not`` / ``no`` / ``never`` appears in the sentence without negating the
+cue's own clause ("The checklist was unavailable, not the binder."). A negation
+over a *report* of the cue is a third case again: it does not negate the cue, but
+it denies that the cue was put on the record, so the guard withholds with
+``ATTRIBUTED_DENIAL`` rather than certifying ("No one said the binder was
+missing.").
+
+Every row below asserts both the exact relation and the exact reason code:
+
+* ``NEGATED`` rows are true negations of the matched cue. The guard must abstain
+  with ``NEGATED_CUE``; certifying either direction inverts the sentence.
+* ``WITHHELD`` rows deny that the proposition was *reported* — a quantifier or a
+  negation over a reporting verb of either class, evidential (``confirm``) or
+  speech act (``say``). The complement is not asserted, so the guard abstains with
+  ``ATTRIBUTED_DENIAL``. Both classes withhold since 2026-11-02: a denied report
+  is an absence of evidence about the complement, and certifying a direction out
+  of silence is the failure mode this corpus exists to catch.
+* ``CERTIFIES`` rows contain a negation token that does *not* negate the cue or
+  its report (contrast, a quoted "No", a negation in a separate clause, a
+  negation inside a NEUTRAL cue's own wording, a negation of a different cue in
+  the same sentence). They must still certify the cue's stance with no reason
+  code. A row only belongs here when the negation does not scope over a reporting
+  verb — the set shrank on 2026-11-02, it did not disappear.
+
+Rows whose expectation the guard does not meet are left failing on purpose: the
+failing assertion is the defect report (see ``ct3/audit/W9-negation-corpus.md``).
+"""
+import pytest
+
+from app.models import Stance
+from app.semantic_guard import reviewed_relation_details
+
+NEGATED = "NEGATED"
+CERTIFIES = "CERTIFIES"
+
+# (case id, sentence, hypothesis id, expected relation, expected reason code, kind)
+CORPUS = [
+    # Quantifier negation scoping over the cue's subject: abstain.
+    ("TG-NOBODY-WALKED-2", "Nobody walked through the handover with her.", "TRAINING_GAP", None, "NEGATED_CUE", "NEGATED"),
+    ("SC-NO-ONE-WAS-2", "No one was short staffed.", "STAFFING_CONSTRAINTS", None, "NEGATED_CUE", "NEGATED"),
+    ("CU-NOBODY-SAW", "Nobody saw the binder was missing.", "CHECKLIST_UNAVAILABLE", None, "NEGATED_CUE", "NEGATED"),
+    ("PMS-NO-ONE-NOTICED", "No one noticed the system timed out.", "PMS_SYSTEM_ISSUE", None, "NEGATED_CUE", "NEGATED"),
+    ("TP-NOBODY-HAD", "Nobody had time pressure during the shift.", "TIME_PRESSURE", None, "NEGATED_CUE", "NEGATED"),
+    # Quantifier over a reporting verb: a denied report withholds the complement.
+    # REVERSED 2026-11-02: nobody saying X is an absence of evidence, not support for X.
+    ("CU-NO-ONE-SAID", "No one said the binder was missing.", "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # REVERSED 2026-11-02: a denied claim about availability does not show unavailability.
+    ("CU-NOBODY-CLAIMED", "Nobody claimed the checklist was available.", "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # REVERSED 2026-11-02: no report of absence is silence, not evidence of absence.
+    ("SC-NO-ONE-REPORTED", "No one reported that the colleague was absent.", "STAFFING_CONSTRAINTS", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # --- true negations: the clause containing the cue is negated -------------
+    ("TP-AUX-PLAIN", "We did not have enough time to review every open item.",
+     "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
+    ("TP-AUX-CONTRACTED", "They don't have enough time to review every open item.",
+     "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
+    ("TP-AUX-CURLY", "We didn’t have enough time to review every open item.",
+     "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
+    ("TP-AUX-DOES", "The shift does not have enough time to review every open item.",
+     "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
+    ("TP-AUX-NEVER-HAD", "We never had time pressure on that shift.",
+     "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
+    ("TP-PLAIN-NO", "There was no time pressure during the shift.",
+     "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
+    ("TP-PLAIN-NO-TRAILING", "There was no time pressure at all.",
+     "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
+    ("TP-WITHOUT", "The shift ran the handover without time pressure.",
+     "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
+    ("TP-NEVER-RAN-OUT", "We never ran out of time before the inspection.",
+     "TIME_PRESSURE", None, "NEGATED_CUE", NEGATED),
+    ("SC-NO-SUBJECT", "No colleague was absent that morning.",
+     "STAFFING_CONSTRAINTS", None, "NEGATED_CUE", NEGATED),
+    ("SC-NOT-UNDERSTAFFED", "The ward was not understaffed during the night shift.",
+     "STAFFING_CONSTRAINTS", None, "NEGATED_CUE", NEGATED),
+    ("SC-NEVER-SHORT", "It was never short staffed on the late shift.",
+     "STAFFING_CONSTRAINTS", None, "NEGATED_CUE", NEGATED),
+    ("SC-NOT-ENOUGH-PEOPLE", "There were not enough people on duty at midnight.",
+     "STAFFING_CONSTRAINTS", None, "NEGATED_CUE", NEGATED),
+    ("SC-AUX-NEVER-HAD", "The team never had enough people on duty.",
+     "STAFFING_CONSTRAINTS", None, "NEGATED_CUE", NEGATED),
+    ("SC-AUX-DOES-NOT-HAVE", "The shift does not have enough people on duty tonight.",
+     "STAFFING_CONSTRAINTS", None, "NEGATED_CUE", NEGATED),
+    ("TG-NO-SUBJECT", "No colleague was unsure about the handover.",
+     "TRAINING_GAP", None, "NEGATED_CUE", NEGATED),
+    # Negation carried by a quantifier over the cue subject: the sentence denies
+    # that the cue happened, but the negation token is not adjacent to the cue.
+    ("TG-NOBODY-WALKED", "Nobody walked through the handover with her.",
+     "TRAINING_GAP", None, "NEGATED_CUE", NEGATED),
+    ("SC-NO-ONE-WAS", "No one was short staffed.",
+     "STAFFING_CONSTRAINTS", None, "NEGATED_CUE", NEGATED),
+
+    # --- non-negations: a negation token appears, the cue still stands --------
+    ("CU-CONTRAST-ITEM", "The binder was missing, not the checklist.",
+     "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+    # REVERSED 2026-11-02: same sentence as CU-NO-ONE-SAID, kept as the matrix-form
+    # spelling of it; the denied report withholds.
+    ("CU-MATRIX-NO-ONE", "No one said the binder was missing.",
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    ("CU-WEATHER-WHEN", "It was not raining when the binder was missing.",
+     "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+    # REVERSED 2026-11-02. This row pinned a denied *evidential* verb as certifying
+    # the complement, which is the reading that certified "No one confirmed that …"
+    # and accounted for a fifth of the falsification corpus. Denying that something
+    # was established denies the establishment, so the complement is withheld;
+    # denying a *speech act* still certifies, and those rows below are unchanged.
+    ("CU-MATRIX-CONFIRM", "No one could confirm that the checklist was unavailable.",
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # REVERSED 2026-11-02: a bare "no <noun>" subject is the same none-quantifier
+    # as "no one"; nobody reporting it is not evidence for it.
+    ("CU-MATRIX-SUPERVISOR", "No supervisor said the binder was missing.",
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    ("CU-QUOTED-NO", "'No,' the auditor said, 'the binder was missing.'",
+     "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+    ("CU-AUX-TO-GUESS", "The staff did not have to guess whether the checklist "
+     "was unavailable.",
+     "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+    ("CU-LATER-NO-ONE", "The checklist was unavailable but no one complained.",
+     "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+    # "did not have" in the same clause but a separate comma clause: the widened
+    # auxiliary window must not reach across it to swallow the cue.
+    ("CU-AUX-OTHER-CLAUSE", "The staff did not have training, the checklist "
+     "was unavailable.",
+     "CHECKLIST_UNAVAILABLE", Stance.SUPPORTS, None, CERTIFIES),
+    ("CU-CONTRAST-OPPOSITE", "The checklist opened normally, not the binder.",
+     "CHECKLIST_UNAVAILABLE", Stance.CONTRADICTS, None, CERTIFIES),
+    # REVERSED 2026-11-02: "never claimed" scopes over the report, so the complement
+    # (checklist available) is not asserted and cannot be read as a contradiction.
+    ("CU-MATRIX-NEVER-CLAIMED", "We never claimed the checklist was available.",
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # REVERSED 2026-11-02: "did not say" scopes over "the binder was at the desk"; the
+    # corpus intent was the complement's presence, and that presence was denied, not
+    # asserted — so the CU direction is not certified either way.
+    ("CU-MATRIX-DID-NOT-SAY", "The auditor did not say the binder was at the desk.",
+     "CHECKLIST_UNAVAILABLE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    # A negation inside the NEUTRAL cue's own fixed wording is not a negation of
+    # that cue; the neutral row must still be certified.
+    ("CU-NEUTRAL-OWN-NOT", "The note does not address checklist availability.",
+     "CHECKLIST_UNAVAILABLE", Stance.NEUTRAL, None, CERTIFIES),
+    ("CU-NEUTRAL-SAYS-NOTHING", "The report says nothing about checklist availability.",
+     "CHECKLIST_UNAVAILABLE", Stance.NEUTRAL, None, CERTIFIES),
+    # One cue negated, a second cue in the same sentence left intact.
+    ("SC-MIXED-NEGATED-FIRST", "The ward was not understaffed, the colleague was absent.",
+     "STAFFING_CONSTRAINTS", Stance.SUPPORTS, None, CERTIFIES),
+    ("SC-MATRIX-DOUBT", "There is no doubt that the colleague was absent.",
+     "STAFFING_CONSTRAINTS", Stance.SUPPORTS, None, CERTIFIES),
+    ("SC-MATRIX-NOT-CLEAR", "It is not clear why the colleague was absent.",
+     "STAFFING_CONSTRAINTS", Stance.SUPPORTS, None, CERTIFIES),
+    ("TP-MATRIX-NO-ONE-DISPUTED", "No one disputed that the shift had enough time.",
+     "TIME_PRESSURE", Stance.CONTRADICTS, None, CERTIFIES),
+    ("TP-CONTRAST-BUT-NOT", "There was enough time to review every open item, "
+     "but not for the checklist.",
+     "TIME_PRESSURE", Stance.CONTRADICTS, None, CERTIFIES),
+    # REVERSED 2026-11-02: no one attributing the cause is not evidence for the cause.
+    ("TP-MATRIX-NO-ONE-SAID", "No one said time pressure caused the miss.",
+     "TIME_PRESSURE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    ("PMS-LEADING-CUE", "The system timed out, not the printer.",
+     "PMS_SYSTEM_ISSUE", Stance.SUPPORTS, None, CERTIFIES),
+    ("PMS-TRAILING-NOT-ONLY", "The system was unavailable, not only slow.",
+     "PMS_SYSTEM_ISSUE", Stance.SUPPORTS, None, CERTIFIES),
+    # REVERSED 2026-11-02: no report of an outage is silence about the outage.
+    ("PMS-MATRIX-NO-ONE-REPORTED", "No one reported that the system was unavailable.",
+     "PMS_SYSTEM_ISSUE", None, "ATTRIBUTED_DENIAL", "WITHHELD"),
+    ("PMS-MATRIX-NOTHING-SAYS", "Nothing in the notes says the system worked normally.",
+     "PMS_SYSTEM_ISSUE", Stance.CONTRADICTS, None, CERTIFIES),
+    ("PMS-AUX-TO-BE-TOLD", "The staff did not have to be told twice: the system "
+     "timed out.",
+     "PMS_SYSTEM_ISSUE", Stance.SUPPORTS, None, CERTIFIES),
+    ("TG-MATRIX-NO-ONE-DOUBTED", "No one doubted that the colleague was unsure "
+     "about the handover.",
+     "TRAINING_GAP", Stance.SUPPORTS, None, CERTIFIES),
+    ("TG-MATRIX-NOT-OBVIOUS", "It was not obvious that she needed guidance on the handover.",
+     "TRAINING_GAP", Stance.SUPPORTS, None, CERTIFIES),
+]
+
+# Two rows document a gap this widening does not close: a quantifier negation
+# ("Nobody walked", "No one was") sits before the cue subject rather than next to
+# it, so the cue is still certified in the affirmative direction. They are strict
+# xfails: when the guard learns quantifier negation they XPASS and fail, which is
+# the signal to delete the marker rather than let the gap go quiet.
+_KNOWN_UNFIXED: dict[str, str] = {}
+# (empty: every row below is asserted directly. The gate flags an empty reason map as
+# an inert xfail site, which is correct -- a marker that covers no row is a lie.)
+
+_CASES = [
+    pytest.param(sentence, hypothesis_id, expected_relation, expected_reason,
+                 kind, id=case_id)
+    for case_id, sentence, hypothesis_id, expected_relation, expected_reason, kind
+    in CORPUS
+]
+
+
+def test_corpus_covers_both_kinds_and_is_large_enough():
+    assert len(CORPUS) >= 30, len(CORPUS)
+    negations = [row for row in CORPUS if row[5] == NEGATED]
+    certifications = [row for row in CORPUS if row[5] == CERTIFIES]
+    assert len(negations) >= 12, len(negations)
+    assert len(certifications) >= 15, len(certifications)
+    # Both contracted forms of the auxiliary negation are exercised, since the
+    # widened regex matches the curly apostrophe through a separate branch.
+    assert any("don't" in row[1] for row in CORPUS)
+    assert any("didn’t" in row[1] for row in CORPUS)
+
+
+def test_every_corpus_row_actually_matches_a_cue():
+    """A row that matched no cue would abstain for the wrong reason."""
+    for case_id, sentence, hypothesis_id, _, _, _ in CORPUS:
+        detail = reviewed_relation_details(sentence, hypothesis_id)
+        assert detail["cue_ids"], (case_id, sentence)
+        assert all(cue_id.startswith(hypothesis_id + ".") for cue_id in detail["cue_ids"]), (
+            case_id, detail["cue_ids"]
+        )
+
+
+@pytest.mark.parametrize(
+    "sentence,hypothesis_id,expected_relation,expected_reason,kind", _CASES
+)
+def test_negation_corpus_row(sentence, hypothesis_id, expected_relation,
+                             expected_reason, kind):
+    detail = reviewed_relation_details(sentence, hypothesis_id)
+    assert detail["relation"] == expected_relation, (
+        f"{kind} row expected relation {expected_relation!r} for {sentence!r}; "
+        f"got {detail['relation']!r} with reason {detail['reason_code']!r} "
+        f"and cues {detail['cue_ids']!r}"
+    )
+    assert detail["reason_code"] == expected_reason, (
+        f"{kind} row expected reason {expected_reason!r} for {sentence!r}; "
+        f"got {detail['reason_code']!r}"
+    )

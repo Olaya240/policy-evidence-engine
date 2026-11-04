@@ -14,7 +14,7 @@ Intended users are policy owners, operations reviewers, and analysts who need to
 
 Current project scope includes a synthetic policy comparison demo, a separate synthetic handover investigation prototype, typed policy graph and challenge-planning modules, provider boundaries, evaluation/test fixtures, and persistence governance documents. The demo can show candidate relations and citations; it deliberately leaves semantic correctness and operational impact to human review.
 
-Out of scope are legal/compliance determinations, employee ranking or employment decisions, production integration, real policy ingestion, a real model provider connection, and authorization to persist the policy graph. The handover app has no authentication and is not production-ready.
+Out of scope are legal/compliance determinations, employee ranking or employment decisions, production integration, real policy ingestion, HR policy Q&A, HR document retrieval, employee accounts, and authorization to persist the policy graph. The handover app has no authentication and is not production-ready. Its backend has an optional Meta provider; this does not connect Meta to the policy demo or comparison API.
 
 ## What makes this more than a chatbot
 
@@ -27,8 +27,9 @@ The intended unit of reasoning is not just a response. It is a linked set of ver
 | Handover investigation application | Implemented local prototype with API/UI and SQLite access in source; runtime/database state was not inspected for this documentation. |
 | Policy demo UI and demo API | Implemented synthetic demonstration; session history is in process memory. |
 | Policy comparison API | Implemented isolated API using `FakePolicyCandidateAdapter`; returns proposal-only, human-review-required, `INCONCLUSIVE` outcomes. |
+| Handover AI provider | `MockProvider` remains the default; Meta Muse Spark is an optional, explicitly activated backend provider with per-claim attribution. |
 | Policy graph and challenge planner | Implemented as validated, in-process Python modules; planner is not exposed through an HTTP route. |
 | Future policy graph persistence | Contract and vectors are documentation/specification work; database execution is BLOCKED and prototype gate CLOSED. |
-| Real external AI integration | Not connected or authorized by the current project documents. |
+| Policy-demo or HR-document AI integration | Not implemented; the Policy Demo and policy-comparison API remain synthetic/fake. No HR policy Q&A or document retrieval is provided. |
 
 See [current status](CURRENT_STATUS_AND_GAP_ANALYSIS.md) and [architecture](SYSTEM_ARCHITECTURE.md).
