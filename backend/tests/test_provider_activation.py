@@ -134,7 +134,7 @@ def test_factory_does_not_offer_endpoint_model_or_transport_overrides():
     parameters = set(inspect.signature(create_assessment_engine).parameters)
     assert not {"endpoint", "model", "transport"} & parameters
     assert BASETEN_CHAT_COMPLETIONS_ENDPOINT == "https://inference.baseten.co/v1/chat/completions"
-    assert BasetenMuseSparkOpenAdapter.MODEL_SLUG == "meta-models/muse-spark-open"
+    assert BasetenMuseSparkOpenAdapter.MODEL_SLUG == "meta-models/muse-spark-open-1026"
     assert BASETEN_API_KEY_ENV_VAR == "BASETEN_API_KEY"
 
 

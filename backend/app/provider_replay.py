@@ -36,7 +36,7 @@ Cassette format (JSON, UTF-8, `provider-replay-cassette-v1`):
       "format": "provider-replay-cassette-v1",
       "label": "synthetic" | "recorded",
       "endpoint": "https://inference.baseten.co/v1/chat/completions",
-      "model": "meta-models/muse-spark-open",
+      "model": "meta-models/muse-spark-open-1026",
       "timestamp": "2026-11-02T12:00:00Z",
       "request_sha256": "<64 lowercase hex chars>",
       "request_envelope": "<exact bytes of the SerializedProviderRequest>",

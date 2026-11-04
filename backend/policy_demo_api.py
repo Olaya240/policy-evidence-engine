@@ -1,13 +1,20 @@
 """FastAPI demo API for the Story Connect Policy Investigator Evidence Demo.
 
 Runs on port 8083, completely isolated from policy_api.py (port 8082).
-Provides offline demo endpoints for the frontend Policy Demo Page.
-No authentication, no .env, no credentials, no remote network calls.
+Provides endpoints for the frontend Policy Demo Page. Synthetic is the default
+provider. Explicitly selecting the opt-in Meta or Baseten provider can make an
+outbound remote inference request. Credentials are read only from the backend
+process environment and are never returned to clients. Provider failures are
+visible; there is no silent fallback to synthetic output.
 """
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
+import os
 import sys
+import threading
 from typing import Any
 
 import uvicorn
@@ -16,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from pydantic import ValidationError
 
+from app.local_env import load_backend_env_file
 from policy_demo_session import (
     MAX_EVENTS_PER_SESSION,
     PolicySessionError,
@@ -33,6 +41,13 @@ from policy_evidence_demo import (
     get_scenario_pair,
     recompute_investigation_after_challenge,
     run_initial_evidence_investigation,
+)
+from policy_baseten_provider import (
+    POLICY_META_MODEL_ID,
+    POLICY_BASETEN_MODEL_ID,
+    POLICY_PROVIDER_ENV,
+    PolicyProviderError,
+    build_policy_provider_from_environment,
 )
 
 app = FastAPI(title="Story Connect Policy Demo API", version="0.1.0", docs_url=None, redoc_url=None)
@@ -55,6 +70,31 @@ ALLOWED_CHALLENGE_DEPARTMENTS: dict[str, set[str]] = {
 # This bounds application-level accumulation; an ASGI server may allocate an
 # individual receive chunk before handing it to this parser.
 MAX_REQUEST_BYTES = 32_768
+# Fill unset documented variables from backend-only backend/.env. The real
+# process environment wins; see app/local_env.py. Skipped under pytest.
+load_backend_env_file()
+_policy_provider_lock = threading.Lock()
+_policy_provider_initialized = False
+_policy_provider = None
+_policy_provider_failure_code: str | None = None
+
+
+def _get_policy_provider():
+    """Initialize provider and gate once per process so budgets persist across routes."""
+    global _policy_provider_initialized, _policy_provider, _policy_provider_failure_code
+    if not _policy_provider_initialized:
+        with _policy_provider_lock:
+            if not _policy_provider_initialized:
+                try:
+                    _policy_provider = build_policy_provider_from_environment(os.environ)
+                except PolicyProviderError as exc:
+                    _policy_provider_failure_code = exc.code
+                except Exception:
+                    _policy_provider_failure_code = "provider_unavailable"
+                _policy_provider_initialized = True
+    if _policy_provider_failure_code is not None:
+        raise PolicyProviderError(_policy_provider_failure_code)
+    return _policy_provider
 
 
 async def _parse_request_model(request: Request, model: type[BaseModel], allow_empty: bool = False) -> BaseModel | None:
@@ -100,6 +140,7 @@ async def _parse_request_model(request: Request, model: type[BaseModel], allow_e
 
 class CreateSessionRequest(BaseModel):
     scenario_id: str = SCENARIO_SCHEDULING
+    proposal_id: str
 
     @field_validator("scenario_id")
     @classmethod
@@ -123,7 +164,8 @@ class ResetSessionRequest(BaseModel):
 class ChallengeRequest(BaseModel):
     department_id: str
     scenario_id: str = SCENARIO_SCHEDULING
-    session_id: str | None = None
+    session_id: str
+    proposal_id: str
 
     @field_validator("scenario_id")
     @classmethod
@@ -147,6 +189,74 @@ def health() -> dict[str, str]:
     return {"status": "ready", "mode": "offline_demo"}
 
 
+@app.get("/demo-api/provider-status")
+def provider_status(request: Request) -> dict[str, Any]:
+    """Read provider selection and budget reservations without initializing it."""
+    peer = request.client.host if request.client is not None else None
+    try:
+        address = ipaddress.ip_address(peer) if isinstance(peer, str) else None
+    except ValueError:
+        address = None
+    is_loopback = bool(
+        address is not None
+        and (address.is_loopback or (
+            isinstance(address, ipaddress.IPv6Address)
+            and address.ipv4_mapped is not None
+            and address.ipv4_mapped.is_loopback
+        ))
+    )
+    if not is_loopback:
+        raise HTTPException(status_code=403, detail={"error": "loopback_only"})
+
+    configured = os.environ.get(POLICY_PROVIDER_ENV, "synthetic").strip().lower()
+    if configured not in {"synthetic", "meta", "baseten"}:
+        configured = "unknown"
+    pinned_models = {"meta": POLICY_META_MODEL_ID, "baseten": POLICY_BASETEN_MODEL_ID}
+
+    # Snapshot the lazy provider state under the same lock used by initialization.
+    # This endpoint deliberately never calls _get_policy_provider or its builder.
+    with _policy_provider_lock:
+        initialized = _policy_provider_initialized
+        provider = _policy_provider if initialized else None
+        failed = _policy_provider_failure_code is not None if initialized else False
+        if not initialized:
+            provider_id = None
+            model_id = pinned_models.get(configured)
+            state = "not_initialized"
+            attempts = 0
+        elif failed or provider is None:
+            provider_id = None if failed else "synthetic"
+            model_id = pinned_models.get(configured) if failed else None
+            state = "unavailable" if failed else "ready"
+            attempts = 0
+        else:
+            try:
+                actual_id = getattr(provider, "provider_id", None)
+                provider_id = actual_id if actual_id in {"meta", "baseten"} else "unknown"
+                expected_model = pinned_models.get(provider_id)
+                actual_model = getattr(provider, "model_id", None)
+                model_valid = expected_model is not None and actual_model == expected_model
+                model_id = actual_model if model_valid else None
+                gate = getattr(provider, "_gate", None)
+                count = getattr(gate, "request_count", None)
+                attempts = count if type(count) is int and count >= 0 else None
+            except Exception:
+                provider_id = "unknown"
+                model_id = None
+                attempts = None
+                model_valid = False
+            state = "ready" if provider_id != "unknown" and model_valid and attempts is not None else "unknown"
+
+    return {
+        "configured_provider": configured,
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "provider_state": state,
+        "authorized_request_attempts": attempts,
+        "counter_semantics": "budget reservations before transport; not confirmed HTTP deliveries",
+    }
+
+
 @app.get("/demo-api/scenarios")
 def list_scenarios() -> list[dict[str, Any]]:
     """Return allowlisted metadata for all available synthetic policy scenarios."""
@@ -163,9 +273,14 @@ def scenario(id: str = SCENARIO_SCHEDULING) -> dict[str, Any]:
         )
     try:
         pair = get_scenario_pair(id)
-        result = run_initial_evidence_investigation(pair)
+        provider = _get_policy_provider()
+        result = run_initial_evidence_investigation(pair, provider)
         result["scenario_id"] = id
+        result["proposal_id"] = default_session_manager.register_proposal(id, result)
         return result
+    except PolicyProviderError as exc:
+        status_code = 503 if exc.code != "budget_exhausted" else 429
+        raise HTTPException(status_code=status_code, detail={"error": exc.code, "detail": str(exc)}) from None
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -179,14 +294,16 @@ async def create_session(request: Request) -> dict[str, Any]:
     body = await _parse_request_model(request, CreateSessionRequest)
     try:
         assert isinstance(body, CreateSessionRequest)
-        session = default_session_manager.create_session(body.scenario_id)
+        session = default_session_manager.create_session(body.scenario_id, body.proposal_id)
         return {
             "session_id": session.session_id,
             "scenario_id": session.scenario_id,
+            "proposal_id": session.proposal_id,
             "created_at_iso": session.created_at_iso,
         }
     except PolicySessionError as exc:
-        raise HTTPException(status_code=400, detail={"error": exc.code, "detail": exc.detail}) from exc
+        status = 404 if exc.code == "proposal_not_found" else 409 if exc.code == "proposal_scenario_mismatch" else 400
+        raise HTTPException(status_code=status, detail={"error": exc.code, "detail": exc.detail}) from None
 
 
 @app.get("/demo-api/session/{session_id}/history")
@@ -198,6 +315,7 @@ def get_session_history(session_id: str) -> dict[str, Any]:
         return {
             "session_id": snapshot.metadata.session_id,
             "scenario_id": snapshot.metadata.scenario_id,
+            "proposal_id": snapshot.metadata.proposal_id,
             "events": [event.to_dict() for event in snapshot.events],
             "count": len(snapshot.events),
             "event_count": len(snapshot.events),
@@ -219,6 +337,7 @@ async def reset_session(session_id: str, request: Request) -> dict[str, Any]:
         return {
             "session_id": session.session_id,
             "scenario_id": session.scenario_id,
+            "proposal_id": session.proposal_id,
             "events": [],
             "count": 0,
             "event_count": 0,
@@ -244,62 +363,53 @@ async def challenge(request: Request) -> dict[str, Any]:
             },
         )
 
-    # If session_id provided, ensure session exists and matches scenario before computing
-    if body.session_id is not None:
-        try:
-            session = default_session_manager.get_session(body.session_id)
-            if session.scenario_id != body.scenario_id:
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "error": "scenario_mismatch",
-                        "detail": f"Session scenario '{session.scenario_id}' does not match requested scenario '{body.scenario_id}'.",
-                    },
-                )
-        except PolicySessionError as exc:
-            status_code = 404 if exc.code == "session_not_found" else 400
-            raise HTTPException(status_code=status_code, detail={"error": exc.code, "detail": exc.detail}) from exc
-
     try:
-        pair = get_scenario_pair(body.scenario_id)
-        initial = run_initial_evidence_investigation(pair)
-
-        reviewer_challenge = build_scenario_reviewer_challenge(
-            pair, initial, body.department_id, scenario_id=body.scenario_id
+        session, initial = default_session_manager.get_bound_proposal(
+            body.session_id, body.scenario_id, body.proposal_id,
         )
-
-        result = recompute_investigation_after_challenge(pair, initial, reviewer_challenge)
+        pair = get_scenario_pair(body.scenario_id)
+        reviewer_challenge, result = await asyncio.to_thread(
+            _recompute_bound_challenge, pair, initial, body.department_id, body.scenario_id,
+        )
         result["scenario_id"] = body.scenario_id
+        result["proposal_id"] = body.proposal_id
 
-        # If session_id is active, record event to append-only audit trail
-        if body.session_id is not None:
-            summary = (
-                f"Reviewer challenged {body.department_id} on {body.scenario_id}. "
-                f"Applicability: {result['applicability_audit']['applicability_status']}. "
-                f"Core result: {result['recomputed_core_result']['classification']}."
-            )
-            recorded = default_session_manager.record_challenge_event_snapshot(
-                session_id=body.session_id,
-                scenario_id=body.scenario_id,
-                target_department=body.department_id,
-                target_side=reviewer_challenge.target_side,
-                applicability_status=result["applicability_audit"]["applicability_status"],
-                initial_relation=initial.get("proposed_relation", "UNKNOWN"),
-                recomputed_relation=result["recomputed_proposal"]["proposed_relation"],
-                core_classification=result["recomputed_core_result"]["classification"],
-                uncertainty_reasons=result["recomputed_core_result"]["uncertainty_reasons"],
-                contract_enforced=result["contract_enforcement"]["one_sided_change_rejected"],
-                summary=summary,
-                expected_generation=session.generation,
-            )
-            result["session_id"] = body.session_id
-            result["sequence_number"] = recorded.event.sequence_number
-            result["history_count"] = recorded.metadata.history_count
+        summary = (
+            f"Reviewer challenged {body.department_id} on {body.scenario_id} proposal {body.proposal_id}. "
+            f"Applicability: {result['applicability_audit']['applicability_status']}. "
+            f"Core result: {result['recomputed_core_result']['classification']}."
+        )
+        recorded = default_session_manager.record_challenge_event_snapshot(
+            session_id=body.session_id,
+            scenario_id=body.scenario_id,
+            target_department=body.department_id,
+            target_side=reviewer_challenge.target_side,
+            applicability_status=result["applicability_audit"]["applicability_status"],
+            initial_relation=initial.get("proposed_relation", "UNKNOWN"),
+            recomputed_relation=result["recomputed_proposal"]["proposed_relation"],
+            core_classification=result["recomputed_core_result"]["classification"],
+            uncertainty_reasons=result["recomputed_core_result"]["uncertainty_reasons"],
+            contract_enforced=result["contract_enforcement"]["one_sided_change_rejected"],
+            summary=summary,
+            expected_generation=session.generation,
+            proposal_id=body.proposal_id,
+        )
+        result["session_id"] = body.session_id
+        result["sequence_number"] = recorded.event.sequence_number
+        result["history_count"] = recorded.metadata.history_count
 
         return result
     except PolicySessionError as exc:
-        status_code = {"session_not_found": 404, "invalid_session_id": 400, "scenario_mismatch": 422, "session_reset": 409}.get(exc.code, 400)
-        raise HTTPException(status_code=status_code, detail={"error": exc.code, "detail": exc.detail}) from exc
+        status_code = {
+            "session_not_found": 404, "invalid_session_id": 400,
+            "scenario_mismatch": 422, "session_reset": 409,
+            "invalid_proposal_id": 400, "proposal_mismatch": 409,
+            "proposal_unavailable": 409,
+        }.get(exc.code, 400)
+        raise HTTPException(status_code=status_code, detail={"error": exc.code, "detail": exc.detail}) from None
+    except PolicyProviderError as exc:
+        status_code = 503 if exc.code != "budget_exhausted" else 429
+        raise HTTPException(status_code=status_code, detail={"error": exc.code, "detail": str(exc)}) from None
     except HTTPException:
         raise
     except Exception as exc:
@@ -309,10 +419,19 @@ async def challenge(request: Request) -> dict[str, Any]:
         ) from exc
 
 
+def _recompute_bound_challenge(pair, initial, department_id: str, scenario_id: str):
+    """Run bounded local challenge work off the async route's event loop."""
+    reviewer_challenge = build_scenario_reviewer_challenge(
+        pair, initial, department_id, scenario_id=scenario_id,
+    )
+    result = recompute_investigation_after_challenge(pair, initial, reviewer_challenge)
+    return reviewer_challenge, result
+
+
 
 def main() -> None:
     """Run the demo API server on 127.0.0.1:8083."""
-    uvicorn.run(app, host="127.0.0.1", port=8083, reload=False)
+    uvicorn.run(app, host="127.0.0.1", port=8083, reload=False, proxy_headers=False)
 
 
 if __name__ == "__main__":
