@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
 PROTECTED_DATABASE_NAME = ".e2e-phase34.sqlite3"
+E2E_MODE_ENV = "STORY_CONNECT_E2E_MODE"
+E2E_WORKSPACE_ENV = "STORY_CONNECT_E2E_WORKSPACE"
+E2E_DATABASE_PATH_ENV = "STORY_CONNECT_E2E_DATABASE_PATH"
+E2E_OWNER_FILE = ".story-connect-e2e-owner.json"
 
 
 def validate_database_path(path: str | Path) -> Path:
@@ -43,6 +48,49 @@ def validate_database_path(path: str | Path) -> Path:
     except ValueError as exc:
         raise ValueError("HACKATHON_DB_PATH must stay inside hackathon/data") from exc
     return candidate
+
+
+def validate_e2e_database_path(path: str | Path, workspace: str | Path) -> Path:
+    """Validate the separate disposable E2E database boundary without opening it."""
+    raw_workspace = Path(workspace)
+    raw_path = Path(path)
+    if not raw_workspace.is_absolute() or not raw_path.is_absolute():
+        raise ValueError("E2E workspace and database paths must be absolute")
+    if ".." in raw_workspace.parts or ".." in raw_path.parts:
+        raise ValueError("E2E paths cannot contain traversal components")
+    if raw_workspace.name.casefold().startswith("story-connect-e2e-") is False:
+        raise ValueError("E2E workspace name is invalid")
+    system_temp = Path(tempfile.gettempdir()).resolve(strict=True)
+    canonical_workspace = raw_workspace.resolve(strict=False)
+    if canonical_workspace != system_temp and system_temp not in canonical_workspace.parents:
+        raise ValueError("E2E workspace must be inside the system temporary directory")
+    if raw_workspace.is_symlink() or not raw_workspace.is_dir():
+        raise ValueError("E2E workspace must be an existing non-symlink directory")
+
+    expected = raw_workspace / "database" / "e2e.sqlite3"
+    if raw_path != expected:
+        raise ValueError("E2E database path must be the workspace database/e2e.sqlite3 path")
+    components = (raw_workspace / E2E_OWNER_FILE, raw_workspace / "database", expected)
+    for component in components:
+        if component.exists() or component.is_symlink():
+            info = component.lstat()
+            if component.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise ValueError("E2E paths cannot contain symlinks or reparse points")
+    owner = raw_workspace / E2E_OWNER_FILE
+    try:
+        import json
+        metadata = json.loads(owner.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError("E2E workspace ownership metadata is unavailable") from exc
+    if (type(metadata) is not dict or metadata.get("schema") != 1
+            or not isinstance(metadata.get("run_id"), str)
+            or metadata.get("workspace") != str(raw_workspace.resolve(strict=True))):
+        raise ValueError("E2E workspace ownership metadata is invalid")
+    resolved_workspace = raw_workspace.resolve(strict=True)
+    resolved_path = raw_path.resolve(strict=False)
+    if resolved_path != resolved_workspace / "database" / "e2e.sqlite3":
+        raise ValueError("E2E database path escaped its canonical workspace")
+    return resolved_path
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -122,6 +170,15 @@ def _first_failing_field(error: ValidationError, default: str) -> str:
 
 
 def database_path() -> Path:
+    e2e_values = (os.environ.get(E2E_MODE_ENV), os.environ.get(E2E_WORKSPACE_ENV),
+                  os.environ.get(E2E_DATABASE_PATH_ENV))
+    if any(value is not None for value in e2e_values):
+        mode, workspace, database = e2e_values
+        if mode != "1" or not workspace or not database:
+            raise ValueError("Incomplete E2E database configuration")
+        if os.environ.get("HACKATHON_DB_PATH"):
+            raise ValueError("Normal database override is forbidden in E2E mode")
+        return validate_e2e_database_path(database, workspace)
     configured = Path(os.environ.get("HACKATHON_DB_PATH", DATA_DIR / "prototype.sqlite3"))
     return validate_database_path(configured)
 

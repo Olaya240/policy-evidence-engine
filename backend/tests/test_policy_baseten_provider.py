@@ -508,3 +508,5 @@ def test_baseten_provider_status_reporting(monkeypatch):
     assert unavailable["model_id"] == "meta-models/muse-spark-open-1026"
     assert unavailable["provider_state"] == "unavailable"
     assert unavailable["authorized_request_attempts"] == 0
+
+

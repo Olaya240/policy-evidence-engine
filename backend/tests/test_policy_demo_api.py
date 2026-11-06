@@ -21,6 +21,26 @@ from policy_demo_api import app
 client = TestClient(app)
 
 
+def _create_bound_session(scenario_id: str = "scheduling"):
+    scenario_response = client.get(f"/demo-api/scenario?id={scenario_id}")
+    assert scenario_response.status_code == 200
+    proposal = scenario_response.json()
+    session_response = client.post("/demo-api/session/new", json={
+        "scenario_id": scenario_id, "proposal_id": proposal["proposal_id"],
+    })
+    assert session_response.status_code == 200
+    return proposal, session_response.json()
+
+
+def _challenge_payload(proposal: dict[str, Any], session: dict[str, Any], department_id: str):
+    return {
+        "scenario_id": proposal["scenario_id"],
+        "proposal_id": proposal["proposal_id"],
+        "session_id": session["session_id"],
+        "department_id": department_id,
+    }
+
+
 def test_health_returns_offline_demo_status() -> None:
     """GET /demo-api/health should return 200 with mode == 'offline_demo'."""
     response = client.get("/demo-api/health")
@@ -48,11 +68,14 @@ def test_scenario_has_two_provenance_details() -> None:
     assert response.status_code == 200
     result = response.json()
     assert len(result["provenance_details"]) == 2
+    assert len(result["proposal_id"]) == 32
+    assert result["proposal_id"].islower()
 
 
 def test_challenge_returns_inconclusive_with_ungrounded_dept() -> None:
     """POST /demo-api/challenge with HOUSEKEEPING returns INCONCLUSIVE + UNGROUNDED."""
-    response = client.post("/demo-api/challenge", json={"department_id": "HOUSEKEEPING"})
+    proposal, session = _create_bound_session()
+    response = client.post("/demo-api/challenge", json=_challenge_payload(proposal, session, "HOUSEKEEPING"))
     assert response.status_code == 200
     result = response.json()
     assert result["recomputed_proposal"]["proposed_relation"] == "INCONCLUSIVE"
@@ -60,9 +83,26 @@ def test_challenge_returns_inconclusive_with_ungrounded_dept() -> None:
     assert result["contract_enforcement"]["one_sided_change_rejected"] is True
 
 
+def test_challenge_uses_the_immutable_displayed_proposal_snapshot() -> None:
+    proposal, session = _create_bound_session()
+    displayed_relation = proposal["proposed_relation"]
+    proposal["proposed_relation"] = "INCONCLUSIVE"  # local client copy is not authoritative
+
+    response = client.post(
+        "/demo-api/challenge",
+        json=_challenge_payload(proposal, session, "HOUSEKEEPING"),
+    )
+    assert response.status_code == 200
+    assert response.json()["proposal_id"] == session["proposal_id"]
+    history = client.get(f"/demo-api/session/{session['session_id']}/history").json()
+    assert history["events"][0]["initial_relation"] == displayed_relation
+    assert history["events"][0]["proposal_id"] == session["proposal_id"]
+
+
 def test_challenge_recomputed_differs_from_initial() -> None:
     """After challenge, recomputed proposed_relation differs from the initial COMPATIBLE_CHANGE."""
-    response = client.post("/demo-api/challenge", json={"department_id": "HOUSEKEEPING"})
+    proposal, session = _create_bound_session()
+    response = client.post("/demo-api/challenge", json=_challenge_payload(proposal, session, "HOUSEKEEPING"))
     assert response.status_code == 200
     result = response.json()
     assert result["recomputed_proposal"]["proposed_relation"] != "COMPATIBLE_CHANGE"
@@ -71,7 +111,8 @@ def test_challenge_recomputed_differs_from_initial() -> None:
 
 def test_challenge_preserves_human_review_invariant() -> None:
     """After challenge, human_review_required and official_policy_mutated invariants hold."""
-    response = client.post("/demo-api/challenge", json={"department_id": "HOUSEKEEPING"})
+    proposal, session = _create_bound_session()
+    response = client.post("/demo-api/challenge", json=_challenge_payload(proposal, session, "HOUSEKEEPING"))
     assert response.status_code == 200
     result = response.json()
     assert result["recomputed_proposal"]["human_review_required"] is True
@@ -80,7 +121,8 @@ def test_challenge_preserves_human_review_invariant() -> None:
 
 def test_unsupported_department_returns_error() -> None:
     """POST /demo-api/challenge with FINANCE should return 422 (validation error)."""
-    response = client.post("/demo-api/challenge", json={"department_id": "FINANCE"})
+    proposal, session = _create_bound_session()
+    response = client.post("/demo-api/challenge", json=_challenge_payload(proposal, session, "FINANCE"))
     assert response.status_code == 422
 
 
@@ -132,9 +174,10 @@ def test_unknown_scenario_id_returns_400() -> None:
 def test_scenario_specific_challenge_handling() -> None:
     """POST /demo-api/challenge operates on the selected scenario."""
     # Uniform challenge
+    uniform_proposal, uniform_session = _create_bound_session("uniform_grooming")
     u_res = client.post(
         "/demo-api/challenge",
-        json={"scenario_id": "uniform_grooming", "department_id": "CONCIERGE"},
+        json=_challenge_payload(uniform_proposal, uniform_session, "CONCIERGE"),
     )
     assert u_res.status_code == 200
     data = u_res.json()
@@ -143,9 +186,10 @@ def test_scenario_specific_challenge_handling() -> None:
     assert data["scenario_id"] == "uniform_grooming"
 
     # Lounge challenge
+    lounge_proposal, lounge_session = _create_bound_session("lounge_access")
     l_res = client.post(
         "/demo-api/challenge",
-        json={"scenario_id": "lounge_access", "department_id": "VALET"},
+        json=_challenge_payload(lounge_proposal, lounge_session, "VALET"),
     )
     assert l_res.status_code == 200
     data = l_res.json()
@@ -156,13 +200,11 @@ def test_scenario_specific_challenge_handling() -> None:
 
 def test_session_lifecycle_and_history() -> None:
     """Session creation, initial empty history, and valid session metadata."""
-    # Create session
-    create_res = client.post("/demo-api/session/new", json={"scenario_id": "scheduling"})
-    assert create_res.status_code == 200
-    create_data = create_res.json()
+    proposal, create_data = _create_bound_session()
     assert "session_id" in create_data
     assert len(create_data["session_id"]) == 32
     assert create_data["scenario_id"] == "scheduling"
+    assert create_data["proposal_id"] == proposal["proposal_id"]
 
     session_id = create_data["session_id"]
 
@@ -172,19 +214,90 @@ def test_session_lifecycle_and_history() -> None:
     hist_data = hist_res.json()
     assert hist_data["session_id"] == session_id
     assert hist_data["scenario_id"] == "scheduling"
+    assert hist_data["proposal_id"] == proposal["proposal_id"]
     assert hist_data["event_count"] == 0
     assert hist_data["events"] == []
 
 
+def test_session_creation_rejects_missing_stale_and_mismatched_proposal_references() -> None:
+    missing = client.post("/demo-api/session/new", json={"scenario_id": "scheduling"})
+    assert missing.status_code == 422
+
+    proposal = client.get("/demo-api/scenario?id=scheduling").json()
+    stale = client.post("/demo-api/session/new", json={
+        "scenario_id": "scheduling", "proposal_id": "f" * 32,
+    })
+    assert stale.status_code == 404
+    assert stale.json()["detail"]["error"] == "proposal_not_found"
+
+    wrong_scenario = client.post("/demo-api/session/new", json={
+        "scenario_id": "uniform_grooming", "proposal_id": proposal["proposal_id"],
+    })
+    assert wrong_scenario.status_code == 409
+    assert wrong_scenario.json()["detail"]["error"] == "proposal_scenario_mismatch"
+
+    consumed = client.post("/demo-api/session/new", json={
+        "scenario_id": "scheduling", "proposal_id": proposal["proposal_id"],
+    })
+    assert consumed.status_code == 200
+    replay = client.post("/demo-api/session/new", json={
+        "scenario_id": "scheduling", "proposal_id": proposal["proposal_id"],
+    })
+    assert replay.status_code == 404
+    assert replay.json()["detail"]["error"] == "proposal_not_found"
+
+
+def test_challenge_rejects_missing_or_different_proposal_id_without_history_mutation() -> None:
+    proposal, session = _create_bound_session()
+    missing = client.post("/demo-api/challenge", json={
+        "scenario_id": "scheduling", "department_id": "HOUSEKEEPING",
+        "session_id": session["session_id"],
+    })
+    assert missing.status_code == 422
+
+    different = client.post("/demo-api/challenge", json={
+        **_challenge_payload(proposal, session, "HOUSEKEEPING"),
+        "proposal_id": "e" * 32,
+    })
+    assert different.status_code == 409
+    assert different.json()["detail"]["error"] == "proposal_mismatch"
+    history = client.get(f"/demo-api/session/{session['session_id']}/history").json()
+    assert history["events"] == []
+
+
+def test_async_challenge_worker_failure_is_sanitized(monkeypatch: pytest.MonkeyPatch) -> None:
+    import policy_demo_api
+
+    proposal, session = _create_bound_session()
+
+    def fail_in_worker(*_args, **_kwargs):
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+        raise RuntimeError("private provider response must not escape")
+
+    monkeypatch.setattr(policy_demo_api, "_recompute_bound_challenge", fail_in_worker)
+    response = client.post(
+        "/demo-api/challenge",
+        json=_challenge_payload(proposal, session, "HOUSEKEEPING"),
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "error": "demo_unavailable",
+        "detail": "Demo scenario could not be computed.",
+    }
+    assert "private provider response" not in response.text
+    assert client.get(f"/demo-api/session/{session['session_id']}/history").json()["events"] == []
+
+
 def test_consecutive_challenges_append_ordered_history() -> None:
     """Multiple challenges within a session append ordered immutable events."""
-    create_res = client.post("/demo-api/session/new", json={"scenario_id": "scheduling"})
-    session_id = create_res.json()["session_id"]
+    proposal, session = _create_bound_session()
+    session_id = session["session_id"]
 
     # Challenge #1: HOUSEKEEPING
     c1_res = client.post(
         "/demo-api/challenge",
-        json={"scenario_id": "scheduling", "department_id": "HOUSEKEEPING", "session_id": session_id},
+        json=_challenge_payload(proposal, session, "HOUSEKEEPING"),
     )
     assert c1_res.status_code == 200
     c1_data = c1_res.json()
@@ -194,7 +307,7 @@ def test_consecutive_challenges_append_ordered_history() -> None:
     # Challenge #2: FRONT_DESK
     c2_res = client.post(
         "/demo-api/challenge",
-        json={"scenario_id": "scheduling", "department_id": "FRONT_DESK", "session_id": session_id},
+        json=_challenge_payload(proposal, session, "FRONT_DESK"),
     )
     assert c2_res.status_code == 200
     c2_data = c2_res.json()
@@ -212,6 +325,8 @@ def test_consecutive_challenges_append_ordered_history() -> None:
     evt2 = hist_data["events"][1]
 
     assert evt1["sequence_number"] == 1
+    assert evt1["proposal_id"] == proposal["proposal_id"]
+    assert evt1["initial_relation"] == proposal["proposed_relation"]
     assert evt1["target_department"] == "HOUSEKEEPING"
     assert evt1["applicability_status"] == "UNGROUNDED"
     assert evt1["recomputed_relation"] == "INCONCLUSIVE"
@@ -219,6 +334,7 @@ def test_consecutive_challenges_append_ordered_history() -> None:
     assert "incomplete_comparison" in evt1["uncertainty_reasons"]
 
     assert evt2["sequence_number"] == 2
+    assert evt2["proposal_id"] == proposal["proposal_id"]
     assert evt2["target_department"] == "FRONT_DESK"
     assert evt2["applicability_status"] == "UNGROUNDED"
     assert evt2["recomputed_relation"] == "INCONCLUSIVE"
@@ -229,7 +345,8 @@ def test_challenge_count_uses_locked_history_snapshot(monkeypatch: pytest.Monkey
     import policy_demo_api
     from policy_demo_session import default_session_manager
 
-    session_id = client.post("/demo-api/session/new", json={"scenario_id": "scheduling"}).json()["session_id"]
+    proposal, bound_session = _create_bound_session()
+    session_id = bound_session["session_id"]
     real_get_session = default_session_manager.get_session
     snapshots: list[int] = []
 
@@ -247,16 +364,16 @@ def test_challenge_count_uses_locked_history_snapshot(monkeypatch: pytest.Monkey
         def get_session(self, sid):
             return SessionView(real_get_session(sid))
 
+        def get_bound_proposal(self, sid, scenario_id, proposal_id):
+            return default_session_manager.get_bound_proposal(sid, scenario_id, proposal_id)
+
         def record_challenge_event_snapshot(self, **kwargs):
             snapshot = default_session_manager.record_challenge_event_snapshot(**kwargs)
             snapshots.append(snapshot.metadata.history_count)
             return snapshot
 
     monkeypatch.setattr(policy_demo_api, "default_session_manager", ManagerView())
-    response = client.post(
-        "/demo-api/challenge",
-        json={"scenario_id": "scheduling", "department_id": "HOUSEKEEPING", "session_id": session_id},
-    )
+    response = client.post("/demo-api/challenge", json=_challenge_payload(proposal, bound_session, "HOUSEKEEPING"))
     assert response.status_code == 200
     assert snapshots == [1]
     assert response.json()["history_count"] == snapshots[0]
@@ -421,7 +538,7 @@ def test_request_parser_accepts_missing_content_length_and_bounds_stream() -> No
             for chunk in self.chunks:
                 yield chunk
 
-    req = RequestStub({"content-type": "application/json"}, [b'{"scenario_id":"scheduling"}'])
+    req = RequestStub({"content-type": "application/json"}, [b'{"scenario_id":"scheduling","proposal_id":"' + b"a" * 32 + b'"}'])
     parsed = asyncio.run(policy_demo_api._parse_request_model(req, policy_demo_api.CreateSessionRequest))
     assert parsed.scenario_id == "scheduling"
     assert req.stream_started
@@ -445,17 +562,13 @@ def test_request_parser_accepts_missing_content_length_and_bounds_stream() -> No
     assert getattr(untyped_too_large.value, "status_code", None) == 413
 
 
-def _new_session_id() -> str:
-    response = client.post("/demo-api/session/new", json={"scenario_id": "scheduling"})
-    assert response.status_code == 200
-    return response.json()["session_id"]
+def _new_bound_session(scenario_id: str = "scheduling"):
+    return _create_bound_session(scenario_id)
 
 
-def _run_challenge_in_thread(session_id: str, output: list[Any]) -> threading.Thread:
+def _run_challenge_in_thread(proposal: dict[str, Any], session: dict[str, Any], output: list[Any]) -> threading.Thread:
     def worker():
-        output.append(client.post("/demo-api/challenge", json={
-            "scenario_id": "scheduling", "department_id": "HOUSEKEEPING", "session_id": session_id,
-        }))
+        output.append(client.post("/demo-api/challenge", json=_challenge_payload(proposal, session, "HOUSEKEEPING")))
     thread = threading.Thread(target=worker)
     thread.start()
     return thread
@@ -463,7 +576,8 @@ def _run_challenge_in_thread(session_id: str, output: list[Any]) -> threading.Th
 
 def test_reset_between_challenge_validation_and_record_returns_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
     import policy_demo_api
-    session_id = _new_session_id()
+    proposal, session = _new_bound_session()
+    session_id = session["session_id"]
     entered, release = threading.Event(), threading.Event()
     original = policy_demo_api.recompute_investigation_after_challenge
     def paused(*args, **kwargs):
@@ -473,7 +587,7 @@ def test_reset_between_challenge_validation_and_record_returns_conflict(monkeypa
         return result
     monkeypatch.setattr(policy_demo_api, "recompute_investigation_after_challenge", paused)
     responses = []
-    thread = _run_challenge_in_thread(session_id, responses)
+    thread = _run_challenge_in_thread(proposal, session, responses)
     try:
         assert entered.wait(5)
         reset = client.post(f"/demo-api/session/{session_id}/reset", json={"scenario_id": "scheduling"})
@@ -489,7 +603,8 @@ def test_reset_between_challenge_validation_and_record_returns_conflict(monkeypa
 
 def test_scenario_change_during_challenge_returns_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
     import policy_demo_api
-    session_id = _new_session_id()
+    proposal, session = _new_bound_session()
+    session_id = session["session_id"]
     entered, release = threading.Event(), threading.Event()
     original = policy_demo_api.recompute_investigation_after_challenge
     def paused(*args, **kwargs):
@@ -499,7 +614,7 @@ def test_scenario_change_during_challenge_returns_mismatch(monkeypatch: pytest.M
         return result
     monkeypatch.setattr(policy_demo_api, "recompute_investigation_after_challenge", paused)
     responses = []
-    thread = _run_challenge_in_thread(session_id, responses)
+    thread = _run_challenge_in_thread(proposal, session, responses)
     try:
         assert entered.wait(5)
         reset = client.post(f"/demo-api/session/{session_id}/reset", json={"scenario_id": "uniform_grooming"})
@@ -514,16 +629,17 @@ def test_scenario_change_during_challenge_returns_mismatch(monkeypatch: pytest.M
 
 def test_concurrent_challenges_return_atomic_event_and_count_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
     import policy_demo_api
-    session_id = _new_session_id()
+    proposal, session = _new_bound_session()
+    session_id = session["session_id"]
     barrier = threading.Barrier(2)
-    original = policy_demo_api.run_initial_evidence_investigation
+    original = policy_demo_api._recompute_bound_challenge
     def synchronized(*args, **kwargs):
         result = original(*args, **kwargs)
         barrier.wait(timeout=5)
         return result
-    monkeypatch.setattr(policy_demo_api, "run_initial_evidence_investigation", synchronized)
+    monkeypatch.setattr(policy_demo_api, "_recompute_bound_challenge", synchronized)
     responses: list[Any] = []
-    threads = [_run_challenge_in_thread(session_id, responses) for _ in range(2)]
+    threads = [_run_challenge_in_thread(proposal, session, responses) for _ in range(2)]
     for thread in threads:
         thread.join(5)
     assert all(not thread.is_alive() for thread in threads)
@@ -535,7 +651,8 @@ def test_concurrent_challenges_return_atomic_event_and_count_pairs(monkeypatch: 
 def test_reset_after_atomic_record_does_not_change_challenge_response_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     import policy_demo_api
     from policy_demo_session import default_session_manager
-    session_id = _new_session_id()
+    proposal, session = _new_bound_session()
+    session_id = session["session_id"]
     recorded, release = threading.Event(), threading.Event()
     original = default_session_manager.record_challenge_event_snapshot
     def paused(**kwargs):
@@ -545,7 +662,7 @@ def test_reset_after_atomic_record_does_not_change_challenge_response_snapshot(m
         return snapshot
     monkeypatch.setattr(default_session_manager, "record_challenge_event_snapshot", paused)
     responses = []
-    thread = _run_challenge_in_thread(session_id, responses)
+    thread = _run_challenge_in_thread(proposal, session, responses)
     try:
         assert recorded.wait(5)
         reset = client.post(f"/demo-api/session/{session_id}/reset", json={"scenario_id": "scheduling"})
@@ -561,13 +678,13 @@ def test_reset_after_atomic_record_does_not_change_challenge_response_snapshot(m
 
 def test_session_reset_clears_history() -> None:
     """POST /demo-api/session/{session_id}/reset clears history events."""
-    create_res = client.post("/demo-api/session/new", json={"scenario_id": "uniform_grooming"})
-    session_id = create_res.json()["session_id"]
+    proposal, session = _create_bound_session("uniform_grooming")
+    session_id = session["session_id"]
 
     # Run challenge
     client.post(
         "/demo-api/challenge",
-        json={"scenario_id": "uniform_grooming", "department_id": "CONCIERGE", "session_id": session_id},
+        json=_challenge_payload(proposal, session, "CONCIERGE"),
     )
 
     # Verify 1 event
@@ -589,10 +706,9 @@ def test_session_reset_clears_history() -> None:
 
 
 def test_invalid_reset_scenario_is_rejected_without_clearing_history() -> None:
-    session_id = _new_session_id()
-    challenge = client.post("/demo-api/challenge", json={
-        "scenario_id": "scheduling", "department_id": "HOUSEKEEPING", "session_id": session_id,
-    })
+    proposal, session = _new_bound_session()
+    session_id = session["session_id"]
+    challenge = client.post("/demo-api/challenge", json=_challenge_payload(proposal, session, "HOUSEKEEPING"))
     assert challenge.status_code == 200
     response = client.post(f"/demo-api/session/{session_id}/reset", json={"scenario_id": "unknown"})
     assert response.status_code == 422
@@ -601,12 +717,15 @@ def test_invalid_reset_scenario_is_rejected_without_clearing_history() -> None:
 
 def test_session_isolation_rejects_scenario_mismatch() -> None:
     """A session created for uniform_grooming rejects scheduling challenges with 422."""
-    create_res = client.post("/demo-api/session/new", json={"scenario_id": "uniform_grooming"})
-    session_id = create_res.json()["session_id"]
+    uniform_proposal, uniform_session = _create_bound_session("uniform_grooming")
+    scheduling_proposal = client.get("/demo-api/scenario?id=scheduling").json()
 
     mismatch_res = client.post(
         "/demo-api/challenge",
-        json={"scenario_id": "scheduling", "department_id": "HOUSEKEEPING", "session_id": session_id},
+        json={
+            **_challenge_payload(scheduling_proposal, uniform_session, "HOUSEKEEPING"),
+            "scenario_id": "scheduling",
+        },
     )
     assert mismatch_res.status_code == 422
     assert mismatch_res.json()["detail"]["error"] == "scenario_mismatch"
@@ -658,9 +777,10 @@ def test_bounded_history_eviction() -> None:
 
 def test_challenge_mismatched_department_returns_422() -> None:
     """POST /demo-api/challenge with mismatched department for scenario returns 422."""
+    proposal, session = _create_bound_session("uniform_grooming")
     response = client.post(
         "/demo-api/challenge",
-        json={"scenario_id": "uniform_grooming", "department_id": "HOUSEKEEPING"},
+        json=_challenge_payload(proposal, session, "HOUSEKEEPING"),
     )
     assert response.status_code == 422
     assert "does not match expected challenge target" in str(response.json())

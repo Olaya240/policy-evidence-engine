@@ -151,3 +151,21 @@ export async function loadScenarioAndCreateSession<Scenario, Session>(options: {
   const session = await options.createSession(scenario);
   if (options.isCurrent()) options.onSuccess(scenario, session);
 }
+
+/** Share an in-flight load across StrictMode effect replay without caching its result. */
+export function loadOnceWhilePending<T>(
+  inFlight: Map<string, Promise<T>>,
+  key: string,
+  load: () => Promise<T>,
+): Promise<T> {
+  const existing = inFlight.get(key);
+  if (existing) return existing;
+
+  const request = Promise.resolve().then(load);
+  inFlight.set(key, request);
+  const clear = () => {
+    if (inFlight.get(key) === request) inFlight.delete(key);
+  };
+  void request.then(clear, clear);
+  return request;
+}

@@ -26,14 +26,27 @@ export type ScenarioResult = {
   provenance_details: ProvenanceDetail[];
   provenance_limitation_notice: string;
   scenario_id: string;
+  proposal_id: string;
+  provider_attribution: { provider: "synthetic" | "baseten" | "meta"; model: string | null; request_id?: string; usage?: Record<string, number> };
 };
 
 export type SessionCreatedResponse = {
   session_id: string;
   scenario_id: string;
+  proposal_id: string;
   created_at_iso?: string;
   created_at?: string;
 };
+
+export type PolicyDemoProviderSource = "synthetic" | "baseten" | "meta" | "unknown";
+
+/** Attribute results only from explicit response metadata; never infer from configuration. */
+export function policyDemoProviderSource(value: unknown): PolicyDemoProviderSource {
+  if (!isObject(value)) return "unknown";
+  return value.provider === "synthetic" || value.provider === "baseten" || value.provider === "meta"
+    ? value.provider
+    : "unknown";
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -83,22 +96,33 @@ export function validateScenarioResult(value: unknown, expectedScenarioId: strin
   if (!isObject(value) || !hasStringFields(value, [
     "comparison_id", "request_id", "proposed_relation", "candidate_id", "reasoning", "status",
     "semantic_support", "core_classification", "core_proposed_classification", "impact_status",
-    "provenance_limitation_notice", "scenario_id",
+    "provenance_limitation_notice", "scenario_id", "proposal_id",
   ]) ||
     !isNonEmptyString(expectedScenarioId) || value.scenario_id !== expectedScenarioId ||
+    !/^[a-f0-9]{32}$/.test(value.proposal_id as string) ||
     typeof value.human_review_required !== "boolean" ||
     typeof value.official_policy_mutated !== "boolean" ||
     !Array.isArray(value.uncertainty_reasons) || !value.uncertainty_reasons.every(isNonEmptyString) ||
     !Array.isArray(value.provenance_details) || !value.provenance_details.every(isProvenanceDetail)) {
     throw new Error("Policy Demo returned an invalid scenario response.");
   }
+  if (!isObject(value.provider_attribution) ||
+    (value.provider_attribution.provider !== "synthetic" &&
+      value.provider_attribution.provider !== "baseten" &&
+      value.provider_attribution.provider !== "meta") ||
+    !(value.provider_attribution.model === null || isNonEmptyString(value.provider_attribution.model))) {
+    throw new Error("Policy Demo returned invalid provider attribution.");
+  }
   return value as unknown as ScenarioResult;
 }
 
-export function validateSessionCreatedResponse(value: unknown, expectedScenarioId: string): SessionCreatedResponse {
-  if (!isObject(value) || !hasStringFields(value, ["session_id", "scenario_id"]) ||
+export function validateSessionCreatedResponse(
+  value: unknown, expectedScenarioId: string, expectedProposalId: string,
+): SessionCreatedResponse {
+  if (!isObject(value) || !hasStringFields(value, ["session_id", "scenario_id", "proposal_id"]) ||
     !/^[a-f0-9]{32}$/.test(value.session_id as string) ||
     !isNonEmptyString(expectedScenarioId) || value.scenario_id !== expectedScenarioId ||
+    !/^[a-f0-9]{32}$/.test(expectedProposalId) || value.proposal_id !== expectedProposalId ||
     (value.created_at_iso !== undefined && !isBackendIsoTimestamp(value.created_at_iso)) ||
     (value.created_at !== undefined && !isBackendIsoTimestamp(value.created_at))) {
     throw new Error("Policy Demo returned an invalid session response.");

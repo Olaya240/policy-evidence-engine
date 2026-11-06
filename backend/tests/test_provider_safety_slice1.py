@@ -153,7 +153,7 @@ def test_the_projection_constant_is_only_safe_because_of_that_filter():
     "Authorization: Bearer abcdefgh12345678",
     "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
     "sk-abcdefghijklmnop1234",
-    "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+    "ghp_" + "a" * 36,
     "xoxb-1234567890-abcdef",
     "AKIAIOSFODNN7EXAMPLE",
 ])

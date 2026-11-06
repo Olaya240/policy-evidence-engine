@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  policyDemoProviderSource,
   validateScenarioResult,
   validateSessionCreatedResponse,
 } from "../.test-build/policyDemoContract.js";
@@ -14,9 +15,12 @@ const validScenario = {
   provenance_details: [{ side: "OLDER", passage_id: "p1", passage_ordinal: null, start_cp: 0, end_cp: 8,
     quote: "Example.", source_sha256: "a".repeat(64), verified_locally: true }],
   provenance_limitation_notice: "Excerpt only.", scenario_id: "scheduling",
+  proposal_id: "a".repeat(32),
+  provider_attribution: { provider: "synthetic", model: null },
 };
 const validSession = {
-  session_id: "a".repeat(32), scenario_id: "scheduling", created_at_iso: "2026-11-03T10:25:30.123456+00:00",
+  session_id: "b".repeat(32), scenario_id: "scheduling", proposal_id: "a".repeat(32),
+  created_at_iso: "2026-11-03T10:25:30.123456+00:00",
 };
 
 function deferred() {
@@ -36,9 +40,9 @@ function validatedLoad(rawScenario, options = {}) {
       return validateScenarioResult(rawScenario, options.expectedScenarioId ?? "scheduling");
     },
     createSession: async (scenario) => {
-      requests.push({ scenario_id: scenario.scenario_id });
-      const response = options.sessionResponse ?? { ...validSession, scenario_id: scenario.scenario_id };
-      return validateSessionCreatedResponse(response, scenario.scenario_id);
+      requests.push({ scenario_id: scenario.scenario_id, proposal_id: scenario.proposal_id });
+      const response = options.sessionResponse ?? { ...validSession, scenario_id: scenario.scenario_id, proposal_id: scenario.proposal_id };
+      return validateSessionCreatedResponse(response, scenario.scenario_id, scenario.proposal_id);
     },
     onSuccess: (scenario, session) => accepted.push([scenario, session]),
   });
@@ -47,12 +51,27 @@ function validatedLoad(rawScenario, options = {}) {
 
 test("valid scenario and session contracts accept backend values", () => {
   assert.deepEqual(validateScenarioResult(validScenario, "scheduling"), validScenario);
-  assert.deepEqual(validateSessionCreatedResponse(validSession, "scheduling"), validSession);
-  assert.deepEqual(validateSessionCreatedResponse({ session_id: "b".repeat(32), scenario_id: "scheduling" }, "scheduling"),
-    { session_id: "b".repeat(32), scenario_id: "scheduling" });
+  assert.deepEqual(validateSessionCreatedResponse(validSession, "scheduling", validScenario.proposal_id), validSession);
+  assert.deepEqual(validateSessionCreatedResponse({ ...validSession, session_id: "c".repeat(32) }, "scheduling", validScenario.proposal_id),
+    { ...validSession, session_id: "c".repeat(32) });
   assert.deepEqual(validateSessionCreatedResponse({
-    session_id: "c".repeat(32), scenario_id: "scheduling", created_at: "2026-11-03T10:25:30+00:00",
-  }, "scheduling").scenario_id, "scheduling");
+    ...validSession, session_id: "d".repeat(32), created_at: "2026-11-03T10:25:30+00:00",
+  }, "scheduling", validScenario.proposal_id).scenario_id, "scheduling");
+});
+
+test("provider attribution is shown only when explicitly present and valid", () => {
+  assert.equal(policyDemoProviderSource({ provider: "synthetic" }), "synthetic");
+  assert.equal(policyDemoProviderSource({ provider: "baseten" }), "baseten");
+  assert.equal(policyDemoProviderSource({ provider: "meta" }), "meta");
+  assert.equal(policyDemoProviderSource(undefined), "unknown");
+  assert.equal(policyDemoProviderSource(null), "unknown");
+  assert.equal(policyDemoProviderSource({ provider: "provider-unknown" }), "unknown");
+});
+
+test("scenario response accepts and preserves explicit Meta attribution", () => {
+  const scenario = { ...validScenario, provider_attribution: { provider: "meta", model: "muse-spark-1.3" } };
+  assert.deepEqual(validateScenarioResult(scenario, "scheduling"), scenario);
+  assert.equal(policyDemoProviderSource(scenario.provider_attribution), "meta");
 });
 
 test("scenario validator rejects missing, null, blank, mismatched, wrong-type, and malformed nested values", () => {
@@ -88,7 +107,7 @@ test("scenario validator rejects missing, null, blank, mismatched, wrong-type, a
 test("valid scenario triggers exactly one session request bound to its scenario ID", async () => {
   const result = validatedLoad(validScenario);
   await result.run;
-  assert.deepEqual(result.requests, [{ scenario_id: "scheduling" }]);
+  assert.deepEqual(result.requests, [{ scenario_id: "scheduling", proposal_id: validScenario.proposal_id }]);
   assert.equal(result.accepted.length, 1);
   assert.equal(result.accepted[0][1].scenario_id, "scheduling");
 });
@@ -137,7 +156,7 @@ test("stale session response cannot become active", async () => {
   const run = loadScenarioAndCreateSession({
     isCurrent: () => current,
     loadScenario: async () => validateScenarioResult(validScenario, "scheduling"),
-    createSession: () => response.promise.then((value) => validateSessionCreatedResponse(value, "scheduling")),
+    createSession: () => response.promise.then((value) => validateSessionCreatedResponse(value, "scheduling", validScenario.proposal_id)),
     onSuccess: (...values) => accepted.push(values),
   });
   await Promise.resolve();
@@ -158,7 +177,7 @@ test("session validation rejects missing, blank, malformed IDs, scenario mismatc
     { ...validSession, created_at_iso: "2026-11-03T10:25:30Z" },
     { ...validSession, created_at_iso: "2026-02-30T10:25:30+00:00" },
     { ...validSession, created_at: null },
-  ]) assert.throws(() => validateSessionCreatedResponse(value, "scheduling"), /invalid session response/);
+  ]) assert.throws(() => validateSessionCreatedResponse(value, "scheduling", validScenario.proposal_id), /invalid session response/);
 });
 
 test("session creation accepts a valid current scenario/session pair and session mismatch is rejected", async () => {

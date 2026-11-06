@@ -6,6 +6,7 @@ import {
 } from "./auditParsers";
 import {
   initialPolicyDemoAsyncState,
+  loadOnceWhilePending,
   loadScenarioAndCreateSession,
   loadScenarioMetadata,
   policyDemoAsyncReducer,
@@ -15,6 +16,7 @@ import {
 import {
   validateScenarioResult,
   validateSessionCreatedResponse,
+  policyDemoProviderSource,
   type ScenarioResult,
   type SessionCreatedResponse,
 } from "./policyDemoContract";
@@ -29,6 +31,9 @@ type ScenarioMeta = {
 };
 
 type ChallengeResult = {
+  proposal_id: string;
+  provider_attribution?: { provider: "synthetic" | "baseten" | "meta"; model: string | null };
+  recomputation_provider?: string;
   challenge: {
     challenge_id: string;
     target_department: string;
@@ -85,6 +90,7 @@ type AuditTrailEvent = {
   uncertainty_reasons: string[];
   contract_enforced: boolean;
   summary: string;
+  proposal_id: string;
 };
 
 const SCENARIO_DEPARTMENTS: Record<string, string[]> = {
@@ -92,6 +98,8 @@ const SCENARIO_DEPARTMENTS: Record<string, string[]> = {
   uniform_grooming: ["CONCIERGE", "BELL_SERVICE", "VALET"],
   lounge_access: ["VALET", "SECURITY", "BANQUETS"],
 };
+
+const pendingScenarioRequests = new Map<string, Promise<ScenarioResult>>();
 
 const DEFAULT_SCENARIO_LIST: ScenarioMeta[] = [
   {
@@ -195,6 +203,8 @@ const EXPLICIT_DEMO_SCENARIOS: Record<string, ScenarioResult> = {
     official_policy_mutated: false,
     impact_status: "INCONCLUSIVE",
     scenario_id: "scheduling",
+    proposal_id: "00000000000000000000000000000001",
+    provider_attribution: { provider: "synthetic", model: null },
     provenance_limitation_notice:
       "Exact character offsets and SHA-256 hashes prove local substring presence only — never semantic correctness or department applicability.",
     provenance_details: [
@@ -236,6 +246,8 @@ const EXPLICIT_DEMO_SCENARIOS: Record<string, ScenarioResult> = {
     official_policy_mutated: false,
     impact_status: "INCONCLUSIVE",
     scenario_id: "uniform_grooming",
+    proposal_id: "00000000000000000000000000000002",
+    provider_attribution: { provider: "synthetic", model: null },
     provenance_limitation_notice:
       "Exact character offsets and SHA-256 hashes prove local substring presence only — never semantic correctness or department applicability.",
     provenance_details: [
@@ -277,6 +289,8 @@ const EXPLICIT_DEMO_SCENARIOS: Record<string, ScenarioResult> = {
     official_policy_mutated: false,
     impact_status: "INCONCLUSIVE",
     scenario_id: "lounge_access",
+    proposal_id: "00000000000000000000000000000003",
+    provider_attribution: { provider: "synthetic", model: null },
     provenance_limitation_notice:
       "Exact character offsets and SHA-256 hashes prove local substring presence only — never semantic correctness or department applicability.",
     provenance_details: [
@@ -534,13 +548,12 @@ export default function PolicyDemoPage() {
 
     void loadScenarioAndCreateSession<ScenarioResult, SessionCreatedResponse>({
       isCurrent: isCurrentScenarioLoad,
-      loadScenario: async () => validateScenarioResult(
-        await demoApi<unknown>(`/scenario?id=${selectedScenarioId}`), selectedScenarioId,
-      ),
+      loadScenario: () => loadOnceWhilePending(pendingScenarioRequests, selectedScenarioId, async () =>
+        validateScenarioResult(await demoApi<unknown>(`/scenario?id=${selectedScenarioId}`), selectedScenarioId)),
       createSession: async (scenarioData) => validateSessionCreatedResponse(await demoApi<unknown>("/session/new", {
         method: "POST",
-        body: JSON.stringify({ scenario_id: scenarioData.scenario_id }),
-      }), scenarioData.scenario_id),
+        body: JSON.stringify({ scenario_id: scenarioData.scenario_id, proposal_id: scenarioData.proposal_id }),
+      }), scenarioData.scenario_id, scenarioData.proposal_id),
       onSuccess: (scenarioData, sessionData) => {
         if (sessionData.scenario_id !== loadIdentity.scenarioId) {
           throw new Error("The Policy Demo API returned a session for a different scenario.");
@@ -591,6 +604,9 @@ export default function PolicyDemoPage() {
     if (explicitOfflineDemo) {
       const nextSeq = historyEvents.length + 1;
       const syntheticChallenge: ChallengeResult = {
+        proposal_id: scenario.proposal_id,
+        provider_attribution: scenario.provider_attribution,
+        recomputation_provider: "local_policy_engine",
         challenge: {
           challenge_id: `chg-${selectedScenarioId}-${nextSeq}`,
           target_department: selectedDept,
@@ -655,6 +671,7 @@ export default function PolicyDemoPage() {
           uncertainty_reasons: syntheticChallenge.recomputed_core_result.uncertainty_reasons,
           contract_enforced: true,
           summary: `Department ${selectedDept} applicability challenged; proposal recomputed from ${scenario.proposed_relation} to INCONCLUSIVE.`,
+          proposal_id: scenario.proposal_id,
         },
       });
       return;
@@ -669,6 +686,7 @@ export default function PolicyDemoPage() {
           department_id: selectedDept,
           scenario_id: selectedScenarioId,
           session_id: identity.sessionId,
+          proposal_id: scenario.proposal_id,
         }),
       });
       if (!isLifecycleCurrent(lifecycleEpoch)) return;
@@ -875,7 +893,11 @@ export default function PolicyDemoPage() {
             <strong>
               {explicitOfflineDemo
                 ? "EXPLICIT DEMO FIXTURE MODE ACTIVE · NOT CONNECTED TO 127.0.0.1:8083"
-                : "Synthetic demo · strict status boundaries · human review required"}
+                : loading && !scenario
+                  ? "SCENARIO LOADING · provider attribution pending"
+                  : scenario
+                    ? `${policyDemoProviderSource(scenario.provider_attribution) === "baseten" ? "BASETEN GENERATED PROPOSAL" : policyDemoProviderSource(scenario.provider_attribution) === "meta" ? "META GENERATED PROPOSAL" : policyDemoProviderSource(scenario.provider_attribution) === "synthetic" ? "SYNTHETIC DEMO" : "PROVENANCE UNAVAILABLE"} · strict status boundaries · human review required`
+                    : "PROVENANCE UNAVAILABLE · scenario data unavailable"}
             </strong>
             <span>
               All policy data is fictional. SHA-256 citation provenance is returned by the policy demo API. Mask
@@ -1740,6 +1762,11 @@ export default function PolicyDemoPage() {
                       </div>
                     </div>
 
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                      <span style={{ fontSize: 12, color: "var(--ink-secondary)" }}>
+        Proposal source: {policyDemoProviderSource(challenge.provider_attribution)}; recomputation: {challenge.recomputation_provider ?? "unknown"}
+                      </span>
+                    </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
                       <span style={{ fontSize: 12, color: "var(--ink-secondary)" }}>Applicability status:</span>
                       <Badge text={challenge.applicability_audit.applicability_status} color="orange" />

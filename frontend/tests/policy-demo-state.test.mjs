@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   initialPolicyDemoAsyncState,
+  loadOnceWhilePending,
   loadScenarioAndCreateSession,
   loadScenarioMetadata,
   policyDemoAsyncReducer,
@@ -24,6 +25,48 @@ const identityFor = (scenarioId, sessionId, generation) => ({ scenarioId, sessio
 function activeA() {
   return session(scenario(initialPolicyDemoAsyncState, 1, "A"), 1, "A", "session-A");
 }
+
+test("StrictMode replay shares one pending scenario request and only the current effect creates a session", async () => {
+  const response = deferred();
+  const inFlight = new Map();
+  let fetchCount = 0;
+  const load = () => loadOnceWhilePending(inFlight, "scheduling", () => {
+    fetchCount += 1;
+    return response.promise;
+  });
+  let firstCurrent = true;
+  const accepted = [];
+  const sessionRequests = [];
+  const options = (isCurrent) => ({
+    isCurrent,
+    loadScenario: load,
+    createSession: async (item) => { sessionRequests.push(item); return { session_id: "session" }; },
+    onSuccess: (...values) => accepted.push(values),
+  });
+  const firstEffect = loadScenarioAndCreateSession(options(() => firstCurrent));
+  firstCurrent = false;
+  const replayedEffect = loadScenarioAndCreateSession(options(() => true));
+  await Promise.resolve();
+  assert.equal(fetchCount, 1);
+  response.resolve({ scenario_id: "scheduling" });
+  await Promise.all([firstEffect, replayedEffect]);
+  assert.equal(fetchCount, 1);
+  assert.equal(sessionRequests.length, 1);
+  assert.equal(accepted.length, 1);
+});
+
+test("failed shared scenario request clears pending entry so a later load can retry", async () => {
+  const inFlight = new Map();
+  let attempts = 0;
+  const load = () => loadOnceWhilePending(inFlight, "scheduling", async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("offline");
+    return "loaded";
+  });
+  await assert.rejects(load(), /offline/);
+  assert.equal(await load(), "loaded");
+  assert.equal(attempts, 2);
+});
 
 test("scenario switch invalidates a pending A challenge and clears A state", () => {
   const pending = startChallenge(activeA());

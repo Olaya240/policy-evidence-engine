@@ -74,3 +74,13 @@ Thumbs.db
 *.vos
 *.aux
 .lia.cache
+
+# Local CI workflow intentionally excluded from publication
+/.github/workflows/ci.yml
+
+# Local tooling and vendored environment
+/.video-tools/
+
+# Video production exports and source assets
+/demo-video/
+/hackathon/video/

@@ -23,7 +23,7 @@ configuration fails closed to MockProvider.
 
 The adapter is pinned to `https://api.meta.ai/v1/chat/completions` and
 `muse-spark-1.3`. It uses HTTPX already declared in `requirements.txt`; it does
-not load `.env` files. Configure the environment for the backend process using
+not override the process environment: on normal server startup only, unset documented variables are filled from backend-only `backend/.env` (see `app/local_env.py`; skipped under pytest). Configure the environment for the backend process using
 the local shell or a secret manager. Do not put secrets in source, frontend
 variables, or committed files. A real call is a separate, explicit operation.
 

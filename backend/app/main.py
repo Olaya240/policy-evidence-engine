@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, Response
 
 from .access import visible_records
 from .engine import AssessmentEngine, AssessmentError, ProviderError
+from .local_env import load_backend_env_file
 from .models import (ChallengeCreate, HistoryEntry, IngestCreate, Investigation,
                      InvestigationCreate, InvestigationPreset,
                      INVESTIGATION_PRESET_HYPOTHESES,
@@ -213,6 +214,9 @@ async def validation_error_handler(request, exc: RequestValidationError):
 app.add_middleware(
     CORSMiddleware, allow_origins=["http://localhost:5174", "http://127.0.0.1:5174"],
                    allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
+# Fill unset documented variables from backend-only backend/.env. The real
+# process environment wins; see app/local_env.py. Skipped under pytest.
+load_backend_env_file()
 engine = build_engine_from_environment(os.environ)
 
 # Threat row H8: nothing bounded request volume before this. The prototype is
